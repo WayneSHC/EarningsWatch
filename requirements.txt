@@ -1,0 +1,49 @@
+# ══════════════════════════════════════════════════════════════════════════════
+# EarningsWatch — Python 套件需求清單
+# 安裝：pip install -r requirements.txt
+#
+# Python 版本：>= 3.10（使用 X | Y 型別語法）
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── LLM 後端（至少安裝其中一個，推薦先用 Gemini 免費額度）─────────────────────
+google-generativeai>=0.8.0        # Gemini（免費 1500次/天，開發首選）
+anthropic>=0.40.0                 # Claude 3.5 Sonnet（Demo 最佳品質）
+openai>=1.50.0                    # GPT-4o / GPT-4o-mini
+groq>=0.11.0                      # Llama 3.3 70B（免費高速）
+cohere>=5.0.0                     # Command R+（同時用於 Rerank）
+
+# ── Agent 框架 ───────────────────────────────────────────────────────────────
+langgraph>=0.2.0                  # StateGraph + 條件邊（Self-Reflection 核心）
+langchain-core>=0.3.0             # LangGraph 底層依賴
+
+# ── 向量資料庫 ───────────────────────────────────────────────────────────────
+qdrant-client>=1.9.0              # Qdrant Python SDK（支援 query_points API）
+
+# ── Embedding 模型（本地執行，完全免費）─────────────────────────────────────
+sentence-transformers>=3.0.0      # paraphrase-multilingual-mpnet-base-v2 (768維)
+torch>=2.0.0                      # sentence-transformers 底層依賴
+
+# ── PDF 解析 ─────────────────────────────────────────────────────────────────
+pdfplumber>=0.11.0                # 純文字 + 表格解析（免費）
+pandas>=2.0.0                     # 表格 → DataFrame → 自然語言
+
+# ── 即時新聞搜尋 ─────────────────────────────────────────────────────────────
+tavily-python>=0.5.0              # Tavily Search（專為 LLM Agent 設計）
+
+# ── 股價資料 ─────────────────────────────────────────────────────────────────
+yfinance>=0.2.40                  # yfinance（從 Yahoo Finance 抓股價）
+
+# ── UI ───────────────────────────────────────────────────────────────────────
+streamlit>=1.39.0                 # Streamlit Web UI
+
+# ── 工具與通用套件 ───────────────────────────────────────────────────────────
+python-dotenv>=1.0.0              # .env 環境變數載入
+tenacity>=9.0.0                   # LLM 呼叫自動重試（指數退避）
+tqdm>=4.66.0                      # 進度條（embedding 批次處理）
+typing-extensions>=4.10.0         # TypedDict 等型別擴充（Python < 3.12 兼容）
+
+# ── 選用：LlamaParse（表格 PDF 補救，免費額度 1000頁/天）──────────────────────
+# 若不需要表格補救功能可不安裝，系統會自動降級到 pdfplumber
+# llama-parse>=0.5.0
+plotly>=5.0.0                     # 趨勢圖視覺化
+fpdf2>=2.7.0                      # PDF 匯出

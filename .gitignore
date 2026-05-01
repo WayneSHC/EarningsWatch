@@ -1,0 +1,31 @@
+# ══ 機密資料（絕對不進 git）══
+.env
+*.env.local
+.streamlit/secrets.toml   # Streamlit Cloud 密鑰（config.toml 可以進 git）
+
+# ══ Python ══
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+
+# ══ 資料目錄（PDF 太大 / 含客戶資料）══
+data/raw_pdfs/
+data/processed/
+qdrant_storage/
+
+# ══ 快取 / 測試輸出 ══
+cache/demo_cache.json
+tests/benchmark_results*.json
+
+# ══ IDE / 作業系統 ══
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# ══ AI 工具設定（本地專用）══
+.claude/

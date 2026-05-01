@@ -1,0 +1,23 @@
+# .streamlit/config.toml
+# Streamlit 安全設定
+
+[server]
+# 本機開發：127.0.0.1（僅本機）
+# 對外部署：改 0.0.0.0，搭配 nginx HTTPS 反向代理
+address = "127.0.0.1"
+port = 8501
+headless = true
+
+# XSRF 保護（預設已啟用，明確設定確保不被覆蓋）
+enableXsrfProtection = true
+
+# 不允許跨 origin 存取（對外部署可依需求調整）
+enableCORS = false
+
+[browser]
+# 不回傳使用統計到 Streamlit 伺服器
+gatherUsageStats = false
+
+[client]
+# 顯示工具列（方便 Demo）
+toolbarMode = "auto"
