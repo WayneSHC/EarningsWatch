@@ -12,9 +12,22 @@ import os
 import json
 import re
 from typing import Any
-from tenacity import retry, stop_after_attempt, wait_exponential
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from tenacity import retry, stop_after_attempt, wait_exponential, RetryError
 
 from src.core.llm_client import chat as llm_chat
+
+
+def _unwrap(e: BaseException) -> BaseException:
+    """[b] tenacity.RetryError 包住真正的 API 錯誤，UI/log 必須看到底層原因。"""
+    if isinstance(e, RetryError):
+        try:
+            inner = e.last_attempt.exception()
+            if inner is not None:
+                return inner
+        except Exception:
+            pass
+    return e
 
 
 def _extract_json(text: str) -> dict:
@@ -54,7 +67,11 @@ def _extract_json(text: str) -> dict:
     }
 
 
-@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
+@retry(
+    stop=stop_after_attempt(4),
+    wait=wait_exponential(multiplier=2, min=4, max=30),
+    reraise=True,
+)
 def detect_contradiction(
     stmt_a: dict,
     stmt_b: dict,
@@ -114,37 +131,64 @@ def detect_contradiction(
     return _extract_json(raw)
 
 
+def _extract_sources(chunks: list[dict]) -> list[dict]:
+    """[R6] 從 chunks 萃取 (file, page) 來源清單，去重，給報告做引文。"""
+    seen: set[tuple] = set()
+    out: list[dict] = []
+    for c in chunks:
+        p = c.get("payload", {}) or {}
+        key = (p.get("source_file", ""), p.get("source_page", ""))
+        if key in seen or not key[0]:
+            continue
+        seen.add(key)
+        out.append({"file": key[0], "page": key[1]})
+    return out
+
+
 def batch_detect(
     statements_by_quarter: dict[str, list[dict]],
     topic: str,
+    pair_mode: str = "adjacent",
+    chunks_per_pair: int = 4,
 ) -> list[dict]:
     """
-    對多季發言做全組合比對。
+    對多季發言做組合比對。
 
     Args:
         statements_by_quarter: {"2024Q1": [chunk1, chunk2], "2024Q3": [...], ...}
         topic: 比對主題（空字串時仍可執行，LLM 會做通用比對）
+        pair_mode: "adjacent"（預設，N-1 次）或 "all_pairs"（N*(N-1)/2 次，cost 平方）
+        chunks_per_pair: [R5] 每季塞入 LLM 的 chunk 上限（舊版 hardcode=2，現預設=4）
 
     Returns:
-        [{quarter_a, quarter_b, analysis (detect_contradiction 結果)}, ...]
+        [{quarter_a, quarter_b, analysis, sources_a, sources_b}, ...]
+        sources_a/b 為 [R6] 引文用：[{file, page}]
 
     容錯設計：
         - 每個季度對獨立 try/except，單一失敗不影響其餘比對
         - content 截斷至 _MAX_CONTENT 字，防止 token 超限
-        - payload 存取使用 .get() 防呆，避免 KeyError
     """
     # [b] 防呆：topic 非字串時強制轉換
     topic = str(topic).strip() if topic else ""
 
     quarters = sorted(statements_by_quarter.keys())
-    results = []
 
     # 單次 LLM 呼叫的內容上限（約 500 tokens）；超過截斷，不影響語意核心
     _MAX_CONTENT = 2000
 
-    # 取相鄰季度比對（避免 N² 組合爆炸）
-    for i in range(len(quarters) - 1):
-        q_a, q_b = quarters[i], quarters[i + 1]
+    # [R3] 依 pair_mode 產生季度對列表
+    quarter_pairs: list[tuple[str, str]] = []
+    if pair_mode == "all_pairs":
+        for i in range(len(quarters)):
+            for j in range(i + 1, len(quarters)):
+                quarter_pairs.append((quarters[i], quarters[j]))
+    else:  # adjacent（預設）
+        for i in range(len(quarters) - 1):
+            quarter_pairs.append((quarters[i], quarters[i + 1]))
+
+    # 預先建立比對 payload（跳過空內容的對）
+    pairs: list[tuple[dict, dict, str, str, list[dict], list[dict]]] = []
+    for q_a, q_b in quarter_pairs:
         chunks_a = statements_by_quarter.get(q_a, [])
         chunks_b = statements_by_quarter.get(q_b, [])
 
@@ -152,14 +196,11 @@ def batch_detect(
         if not chunks_a or not chunks_b:
             continue
 
-        # 各季取最相關的前 2 個 chunk 合併（已由 retriever 依分數排序）
-        # [b] .get("payload", {}) 防呆：chunk 結構異常時不 crash
-        content_a = "\n".join(
-            c.get("payload", {}).get("content", "") for c in chunks_a[:2]
-        )
-        content_b = "\n".join(
-            c.get("payload", {}).get("content", "") for c in chunks_b[:2]
-        )
+        # [R5] 提升至 chunks_per_pair（預設 4），增加跨季比對的資訊密度
+        used_a = chunks_a[:chunks_per_pair]
+        used_b = chunks_b[:chunks_per_pair]
+        content_a = "\n".join(c.get("payload", {}).get("content", "") for c in used_a)
+        content_b = "\n".join(c.get("payload", {}).get("content", "") for c in used_b)
 
         # [b] 空內容防呆：兩季都無內容則無法比對，記錄後跳過
         if not content_a.strip() or not content_b.strip():
@@ -168,39 +209,63 @@ def batch_detect(
 
         stmt_a = {
             "quarter": q_a,
-            "date":    chunks_a[0].get("payload", {}).get("date", ""),
+            "date":    used_a[0].get("payload", {}).get("date", ""),
             "content": content_a[:_MAX_CONTENT],   # [c] 截斷，防 token 超限
         }
         stmt_b = {
             "quarter": q_b,
-            "date":    chunks_b[0].get("payload", {}).get("date", ""),
+            "date":    used_b[0].get("payload", {}).get("date", ""),
             "content": content_b[:_MAX_CONTENT],
         }
+        # [R6] 紀錄來源清單，後續報告引文
+        sources_a = _extract_sources(used_a)
+        sources_b = _extract_sources(used_b)
+        pairs.append((stmt_a, stmt_b, q_a, q_b, sources_a, sources_b))
 
-        # [b] 獨立 try/except：單一季度對失敗不中止整批偵測
+    def _detect_pair(args: tuple) -> dict:
+        """單一季度對 LLM 偵測，供 ThreadPoolExecutor 並行呼叫。"""
+        stmt_a, stmt_b, q_a, q_b, src_a, src_b = args
         try:
             analysis = detect_contradiction(stmt_a, stmt_b, topic)
         except Exception as e:
-            print(f"[Contradiction] ⚠ {q_a} vs {q_b} 偵測失敗（{type(e).__name__}: {e}）")
-            # 回傳「信心度 0」的降級結果，讓 self_reflect 能偵測到品質問題
+            root = _unwrap(e)
+            # [b] 截斷錯誤訊息防止 API key / endpoint 洩漏到 UI
+            msg = str(root)[:120]
+            print(f"[Contradiction] ⚠ {q_a} vs {q_b} 偵測失敗（{type(root).__name__}: {msg}）")
             analysis = {
                 "same_topic":         False,
                 "stance_change":      "無關",
                 "has_contradiction":  False,
-                "change_detail":      f"偵測失敗：{type(e).__name__}",
+                "change_detail":      f"偵測失敗：{type(root).__name__}",
                 "evidence_early":     "",
                 "evidence_later":     "",
                 "follow_up_question": "",
                 "confidence":         0.0,
             }
-
-        results.append({
+        return {
             "quarter_a": q_a,
             "quarter_b": q_b,
-            "analysis":  analysis,
-        })
+            "analysis": analysis,
+            "sources_a": src_a,  # [R6]
+            "sources_b": src_b,  # [R6]
+        }
 
-    return results
+    if not pairs:
+        return []
+
+    # [c] 並行 LLM 呼叫：LLM API 為 I/O-bound，ThreadPoolExecutor 可有效縮短總等待時間。
+    # [b] max_workers=2：Gemini 免費層 RPM 緊（2.5-flash 約 10 RPM），加上 decomposer/judge
+    #     /tool router 等其他 LLM 呼叫，並行度太高會立刻觸發 429。可由環境變數覆寫。
+    _workers = min(len(pairs), int(os.getenv("LLM_PAIR_WORKERS", "2")))
+    raw_results: dict[int, dict] = {}
+    with ThreadPoolExecutor(max_workers=_workers) as pool:
+        futures = {pool.submit(_detect_pair, p): idx for idx, p in enumerate(pairs)}
+        for fut in as_completed(futures):
+            idx = futures[fut]
+            raw_results[idx] = fut.result()
+
+    # 按原始順序（時間序）排列結果
+    return [raw_results[i] for i in sorted(raw_results)]
 
 
 def detect_promises(chunks_by_quarter: dict[str, list[dict]], topic: str) -> list[dict]:
@@ -211,30 +276,25 @@ def detect_promises(chunks_by_quarter: dict[str, list[dict]], topic: str) -> lis
         [{"promise_quarter", "content", "status": "✅達標/❌未兌現/⚠不明", "detail"}, ...]
     """
     quarters = sorted(chunks_by_quarter.keys())
-    promises = []
 
+    # [c] 預先建立任務清單，後續以 ThreadPoolExecutor 並行送出 LLM 請求
+    tasks: list[tuple[str, str, str]] = []  # (q_prev, q_next, prompt)
     for i in range(len(quarters) - 1):
         q_prev, q_next = quarters[i], quarters[i + 1]
         chunks_prev = chunks_by_quarter.get(q_prev, [])
         chunks_next = chunks_by_quarter.get(q_next, [])
 
-        # 取前 3 個最相關 chunk 合併成一段，讓 LLM 判斷是否含前瞻承諾
-        # 不再依賴 contains_guidance flag（英文 transcript 常被漏標）
         if not chunks_prev:
             continue
         combined_prev = "\n\n".join(
             c.get("payload", {}).get("content", "")
             for c in chunks_prev[:3]
-        )
+        )[:2000]
         combined_next = "\n\n".join(
             c.get("payload", {}).get("content", "")
             for c in chunks_next[:2]
-        )
-        # [c] 截斷：與 batch_detect 保持一致，防止 token 超限
-        combined_prev = combined_prev[:2000]
-        combined_next = combined_next[:1500]
+        )[:1500]
 
-        # 用 LLM 判斷承諾兌現
         prompt = f"""以下是 {q_prev} 季度的管理層發言（可能含前瞻指引）：
 {combined_prev}
 
@@ -249,25 +309,44 @@ def detect_promises(chunks_by_quarter: dict[str, list[dict]], topic: str) -> lis
   "detail": "判斷說明（30字以內）",
   "confidence": 0到1
 }}"""
+        tasks.append((q_prev, q_next, prompt))
 
+    if not tasks:
+        return []
+
+    def _run_promise(args: tuple[str, str, str]) -> dict | None:
+        q_prev, q_next, prompt = args
         try:
             raw = llm_chat(prompt, max_tokens=300)
             result = _extract_json(raw)
-            if result.get("has_promise"):
-                # [b] 用 .get() 防呆：LLM 有時不回傳 status 欄位
-                status_emoji = {"達標": "✅", "未兌現": "❌", "不明": "⚠"}.get(
-                    result.get("status", "不明"), "⚠"
-                )
-                promises.append({
-                    "promise_quarter": q_prev,
-                    "followup_quarter": q_next,
-                    "content": result.get("promise_summary", ""),
-                    "status": f"{status_emoji} {result['status']}",
-                    "detail": result.get("detail", ""),
-                    "confidence": result.get("confidence", 0.5),
-                })
+            if not result.get("has_promise"):
+                return None
+            status_emoji = {"達標": "✅", "未兌現": "❌", "不明": "⚠"}.get(
+                result.get("status", "不明"), "⚠"
+            )
+            return {
+                "promise_quarter": q_prev,
+                "followup_quarter": q_next,
+                "content": result.get("promise_summary", ""),
+                "status": f"{status_emoji} {result.get('status', '不明')}",
+                "detail": result.get("detail", ""),
+                "confidence": result.get("confidence", 0.5),
+                "_idx": None,  # 由呼叫端設定
+            }
         except Exception as e:
-            print(f"[Contradiction] 承諾分析失敗: {e}")
-            continue
+            root = _unwrap(e)
+            print(f"[Contradiction] 承諾分析失敗 {q_prev}->{q_next}: {type(root).__name__}: {str(root)[:120]}")
+            return None
 
-    return promises
+    # [c] 並行 LLM 呼叫（與 batch_detect 一致），保守 max_workers 避免 Gemini 免費層 RPM
+    _workers = min(len(tasks), int(os.getenv("LLM_PAIR_WORKERS", "2")))
+    indexed: dict[int, dict] = {}
+    with ThreadPoolExecutor(max_workers=_workers) as pool:
+        futures = {pool.submit(_run_promise, t): idx for idx, t in enumerate(tasks)}
+        for fut in as_completed(futures):
+            idx = futures[fut]
+            res = fut.result()
+            if res is not None:
+                indexed[idx] = res
+
+    return [indexed[i] for i in sorted(indexed)]

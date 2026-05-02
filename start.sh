@@ -31,7 +31,7 @@ fi
 echo "⏳ 等待 Qdrant 就緒..."
 TIMEOUT=30
 COUNT=0
-until curl -sf http://localhost:6333/healthz | grep -q "ok"; do
+until curl -sf http://localhost:6333/healthz >/dev/null; do
     sleep 1
     COUNT=$((COUNT + 1))
     if [ "$COUNT" -ge "$TIMEOUT" ]; then

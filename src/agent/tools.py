@@ -121,23 +121,94 @@ def get_stock_price(company: str, period: str = "1y") -> dict:
         return {"error": str(e)}
 
 
-def decide_tools(query: str, topic: str) -> list[str]:
-    """
-    Dynamic Tool Router：依問題特徵決定需要哪些工具。
-    回傳工具名稱列表。
+# ── [A2] LLM 驅動工具選擇 ────────────────────────────────────────────────────
+# 工具規格表（function-calling style schema）：
+#   給 LLM 看的工具清單，描述用途、輸入、適用情境。
+#   LLM 依據問題語意決定要呼叫哪些工具，取代純關鍵字匹配。
+TOOL_SPECS = [
+    {
+        "name": "qdrant",
+        "description": "公司法說會逐字稿向量+BM25 檢索（核心工具，幾乎所有財報問題都需要）",
+        "use_when": "需要查公司過去發言、財務指引、跨季比對時",
+        "always_required": True,
+    },
+    {
+        "name": "tavily",
+        "description": "即時網路新聞搜尋",
+        "use_when": "問題涉及『最新』『近期』『今年』『市場動態』『產業趨勢』『競爭對手』時",
+        "always_required": False,
+    },
+    {
+        "name": "yfinance",
+        "description": "股價、市值、52 週高低、漲跌幅",
+        "use_when": "問題明確涉及『股價』『市值』『漲跌』『報酬率』『投資價值』時",
+        "always_required": False,
+    },
+]
 
-    工具選擇邏輯：
-    - 一律使用知識庫向量搜尋（qdrant）
-    - 問到近期新聞 / 市場動態 → 加 tavily
-    - 問到股價 / 市值 → 加 yfinance
-    """
-    tools = ["qdrant"]  # 一定使用知識庫
 
-    # 使用 module-level 常數（_NEWS_KEYWORDS / _STOCK_KEYWORDS），方便日後維護
+def decide_tools_by_keyword(query: str, topic: str) -> list[str]:
+    """關鍵字匹配版本（保留作為 LLM 失敗時的降級路徑）。"""
+    tools = ["qdrant"]
     query_lower = query + topic
     if any(kw in query_lower for kw in _NEWS_KEYWORDS):
         tools.append("tavily")
     if any(kw in query_lower for kw in _STOCK_KEYWORDS):
         tools.append("yfinance")
-
     return tools
+
+
+def decide_tools(query: str, topic: str) -> list[str]:
+    """
+    [A2] LLM 驅動的 Dynamic Tool Router。
+    LLM 依工具規格表（TOOL_SPECS）判斷哪些工具與問題相關，
+    取代舊版純關鍵字匹配（如「最新」→ tavily）。
+
+    LLM 失敗或回應格式錯誤時自動降級為 decide_tools_by_keyword。
+    qdrant 為 always_required，無論 LLM 怎麼選都會包含。
+    """
+    # 內部 import 避免 module load 時的循環依賴（tools 不依賴 llm_client，但保險起見）
+    from src.core.llm_client import chat as llm_chat
+    from src.core.contradiction import _extract_json
+
+    tool_doc = "\n".join(
+        f"- {t['name']}：{t['description']}\n  使用時機：{t['use_when']}"
+        for t in TOOL_SPECS
+    )
+    prompt = f"""你是 Agent 的工具規劃器。可用工具如下：
+{tool_doc}
+
+使用者問題：{query}
+主題：{topic}
+
+只回傳 JSON（不要其他文字）：
+{{
+  "tools": ["qdrant", "tavily", ...],
+  "reasoning": "10字以內的選擇理由"
+}}
+
+規則：
+- qdrant 一律必選（公司問題都需要查發言）
+- 只在問題真的需要時加 tavily 或 yfinance
+- 若不確定，傾向不加（避免拖慢回應）
+"""
+    try:
+        raw = llm_chat(prompt, max_tokens=150)
+        parsed = _extract_json(raw)
+        if isinstance(parsed, dict):
+            tools_raw = parsed.get("tools", [])
+            valid = {t["name"] for t in TOOL_SPECS}
+            tools = [t for t in tools_raw if isinstance(t, str) and t in valid]
+            # 強制納入 always_required 的工具
+            for spec in TOOL_SPECS:
+                if spec.get("always_required") and spec["name"] not in tools:
+                    tools.append(spec["name"])
+            if tools:
+                return tools
+    except Exception as e:
+        # [b] 與 contradiction.py 一致：不吞錯誤訊息，方便辨識 429/quota
+        from src.core.contradiction import _unwrap
+        root = _unwrap(e)
+        print(f"[Tools] decide_tools LLM 失敗（{type(root).__name__}: {str(root)[:120]}），降級為關鍵字匹配")
+
+    return decide_tools_by_keyword(query, topic)

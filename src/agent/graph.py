@@ -9,7 +9,36 @@ LangGraph StateGraph 建構與編譯。
   - 這是整個 Agentic 架構的核心機制
 """
 
+import os
+
 from langgraph.graph import StateGraph, END
+
+
+# ── [S4] LangSmith Tracing（選用，可觀測性）──────────────────────────────────
+# 在 .env 設定下列任一即啟用：
+#   LANGSMITH_TRACING=true   + LANGSMITH_API_KEY=ls__...
+#   LANGCHAIN_TRACING_V2=true + LANGCHAIN_API_KEY=ls__...   （舊版相容）
+# 啟用後 LangGraph 自動上傳每次 Agent 執行的節點軌跡至 https://smith.langchain.com
+# 用途：debug 自我反思迴圈、觀測 prompt token 用量、回放歷史 trace
+def is_tracing_enabled() -> bool:
+    """[S4] 判斷 LangSmith tracing 是否就緒（環境變數齊全）。"""
+    flag = (
+        os.getenv("LANGSMITH_TRACING", "").strip().lower() in ("true", "1", "yes")
+        or os.getenv("LANGCHAIN_TRACING_V2", "").strip().lower() in ("true", "1", "yes")
+    )
+    has_key = bool(
+        os.getenv("LANGSMITH_API_KEY", "").strip()
+        or os.getenv("LANGCHAIN_API_KEY", "").strip()
+    )
+    return flag and has_key
+
+
+def tracing_status() -> str:
+    """[S4] UI 顯示用：回傳簡短狀態字串。"""
+    if is_tracing_enabled():
+        project = os.getenv("LANGSMITH_PROJECT") or os.getenv("LANGCHAIN_PROJECT") or "default"
+        return f"✅ LangSmith：{project}"
+    return "⚪ LangSmith：未啟用"
 
 from src.agent.state import AgentState
 from src.agent.nodes import (
@@ -99,6 +128,7 @@ def run_agent(
         "confidence": 1.0,
         "iteration": 0,
         "reflection_issues": [],
+        "reflection_gaps": [],
         "final_report": "",
         "steps_log": [],
     }

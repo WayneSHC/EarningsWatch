@@ -17,27 +17,28 @@ import os
 from functools import lru_cache
 
 
-# ── 模型設定表 ────────────────────────────────────────────────────────────────
+# ── 模型設定表（2026-01 更新至最新穩定版本）────────────────────────────────
 BACKEND_MODELS = {
     "anthropic": {
-        "dev":  "claude-3-haiku-20240307",
-        "demo": "claude-3-5-sonnet-20241022",
+        "dev":  "claude-haiku-4-5-20251001",    # Claude Haiku 4.5 — 最新最快小型模型
+        "demo": "claude-sonnet-4-6",            # Claude Sonnet 4.6 — 速度與品質最佳平衡 ★ fallback 第三順位
     },
     "openai": {
-        "dev":  "gpt-4o-mini",
-        "demo": "gpt-4o",
+        "dev":  "gpt-5.2-mini",
+        "demo": "gpt-5.2",                      # GPT-5.2 — 預設主力 ★ fallback 第一順位
     },
     "gemini": {
-        "dev":  "gemini-2.0-flash",   # 免費層，開發夠用
-        "demo": "gemini-2.0-flash",   # Demo 時可切換
+        # API 上實際以 -preview 後綴公開，沒有後綴的 ID 會回 404 NOT_FOUND
+        "dev":  "gemini-3-flash-preview",
+        "demo": "gemini-3-pro-preview",         # Gemini 3 Pro ★ fallback 第二順位
     },
     "groq": {
         "dev":  "llama-3.3-70b-versatile",
-        "demo": "llama-3.3-70b-versatile",
+        "demo": "llama-3.3-70b-versatile",      # Groq 推理速度最快（~500 tok/s）
     },
     "cohere": {
-        "dev":  "command-r-08-2024",
-        "demo": "command-r-plus-08-2024",
+        "dev":  "command-r7b-12-2024",
+        "demo": "command-r-plus-08-2024",       # 比 command-a 響應更快、更穩定
     },
 }
 
@@ -48,7 +49,10 @@ _KEY_ENV = {
     "groq":      "GROQ_API_KEY",
     "cohere":    "COHERE_API_KEY",
 }
-_AUTO_DETECT_ORDER = ["anthropic", "gemini", "openai", "groq", "cohere"]
+# [b] 主備援順序：使用者指定 GPT-5.2 → Gemini 3 Pro → Claude 4.6 Sonnet
+#     openai 為主力，配額用盡時自動降級到 gemini，再到 anthropic；
+#     groq / cohere 留作最後保底，避免品質落差。
+_AUTO_DETECT_ORDER = ["openai", "gemini", "anthropic", "groq", "cohere"]
 
 
 def _detect_backend() -> str:
@@ -156,12 +160,19 @@ def _call_openai_compat(prompt: str, model: str, max_tokens: int,
 def _call_gemini(prompt: str, model: str, max_tokens: int) -> str:
     from google.genai import types
     client = _get_gemini_client()
+    # [c] Gemini 2.5 系列的 thinking mode 會吃掉 max_output_tokens 預算，
+    #     對矛盾偵測（需要結構化 JSON）反而會被截斷。設 thinking_budget=0 關閉。
+    cfg_kwargs: dict = {"max_output_tokens": max_tokens}
+    try:
+        cfg_kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=0)
+    except Exception:
+        pass
     resp = client.models.generate_content(
         model=model,
         contents=prompt,
-        config=types.GenerateContentConfig(max_output_tokens=max_tokens),
+        config=types.GenerateContentConfig(**cfg_kwargs),
     )
-    return resp.text.strip()
+    return (resp.text or "").strip()
 
 
 def _call_cohere(prompt: str, model: str, max_tokens: int) -> str:
@@ -172,33 +183,91 @@ def _call_cohere(prompt: str, model: str, max_tokens: int) -> str:
 
 # ── 統一呼叫入口 ──────────────────────────────────────────────────────────────
 
-def chat(prompt: str, max_tokens: int = 600, mode: str = "demo") -> str:
-    """
-    統一 LLM 呼叫介面。
-    傳入 prompt，回傳文字結果，底層自動選擇後端。
-    """
-    # [b] 空 prompt 防呆：避免浪費 token 且回傳無意義結果
-    if not prompt or not prompt.strip():
-        raise ValueError("[LLM] prompt 不可為空字串")
-    backend = _detect_backend()
-    model = BACKEND_MODELS[backend][mode]
-
+def _dispatch(backend: str, prompt: str, model: str, max_tokens: int) -> str:
+    """單一後端呼叫，未知後端 raise。"""
     if backend == "anthropic":
         return _call_anthropic(prompt, model, max_tokens)
-    elif backend == "openai":
+    if backend == "openai":
         return _call_openai_compat(prompt, model, max_tokens)
-    elif backend == "gemini":
+    if backend == "gemini":
         return _call_gemini(prompt, model, max_tokens)
-    elif backend == "groq":
+    if backend == "groq":
         return _call_openai_compat(
             prompt, model, max_tokens,
             base_url="https://api.groq.com/openai/v1",
             api_key_env="GROQ_API_KEY",
         )
-    elif backend == "cohere":
+    if backend == "cohere":
         return _call_cohere(prompt, model, max_tokens)
-    else:
-        raise ValueError(f"未知的 LLM 後端：{backend}")
+    raise ValueError(f"未知的 LLM 後端：{backend}")
+
+
+# [b] 視為「換後端比重試更值得」的錯誤訊號：
+#     quota 用盡 / 認證失敗 / 餘額不足 / 模型名稱錯誤 / 上游服務暫時不可用
+_QUOTA_MARKERS = (
+    "RESOURCE_EXHAUSTED", "quota", "exceeded", "insufficient_quota",
+    "billing", "credit balance", "credit_balance", "low balance",
+    "401", "403",
+    "404", "NOT_FOUND", "not_found", "is not found", "does not exist",
+    "model_not_found", "InvalidModel",
+    "503", "service unavailable", "overloaded",
+    "529",  # Anthropic overloaded
+)
+
+
+def chat(prompt: str, max_tokens: int = 600, mode: str = "demo") -> str:
+    """
+    統一 LLM 呼叫介面。
+    傳入 prompt，回傳文字結果，底層自動選擇後端。
+
+    [b] 自動降級：若主要後端回 quota / 認證錯誤，會依 _AUTO_DETECT_ORDER
+        嘗試下一個有 API key 的後端，避免單一供應商配額用盡時整個 Agent 卡死。
+        每次呼叫最多嘗試 3 個後端。
+    """
+    # [b] 空 prompt 防呆：避免浪費 token 且回傳無意義結果
+    if not prompt or not prompt.strip():
+        raise ValueError("[LLM] prompt 不可為空字串")
+
+    primary = _detect_backend()
+    # 候選順序：主要後端 → 其他有 key 的後端（避開重複）
+    candidates = [primary] + [b for b in _AUTO_DETECT_ORDER
+                              if b != primary and os.getenv(_KEY_ENV[b], "").strip()]
+    last_err: Exception | None = None
+    # [b] 上限 5：openai → gemini → anthropic → groq → cohere；防止無限重試
+    for backend in candidates[:5]:
+        model = BACKEND_MODELS[backend][mode]
+        try:
+            return _dispatch(backend, prompt, model, max_tokens)
+        except Exception as e:
+            last_err = e
+            msg = str(e)
+            if any(m.lower() in msg.lower() for m in _QUOTA_MARKERS):
+                print(f"[LLM] {backend} 配額/認證失敗，嘗試下一後端：{type(e).__name__}: {msg[:100]}")
+                continue
+            # 非 quota 類錯誤（如網路斷線、prompt 格式錯誤）：直接 raise，避免無謂多打
+            raise
+    # 所有候選都失敗
+    raise last_err if last_err else RuntimeError("[LLM] 所有後端都失敗")
+
+
+def available_backends() -> list[str]:
+    """[S1] 回傳目前環境中有 API Key 可用的所有後端，給 UI 切換器使用。"""
+    return [b for b in _AUTO_DETECT_ORDER if os.getenv(_KEY_ENV[b], "").strip()]
+
+
+def set_backend(backend: str) -> None:
+    """
+    [S1] 動態切換 LLM 後端。
+    更新環境變數 + 清空 lru_cache 強制重新偵測。
+    無效後端或無 API Key 時 raise ValueError，由呼叫端決定 UI 提示。
+    """
+    backend = backend.strip().lower()
+    if backend not in BACKEND_MODELS:
+        raise ValueError(f"未知後端：{backend}")
+    if not os.getenv(_KEY_ENV[backend], "").strip():
+        raise ValueError(f"{backend} 缺少 {_KEY_ENV[backend]}")
+    os.environ["LLM_BACKEND"] = backend
+    _detect_backend.cache_clear()
 
 
 def which_backend() -> str:

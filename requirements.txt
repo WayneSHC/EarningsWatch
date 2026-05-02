@@ -42,6 +42,10 @@ tenacity>=9.0.0                   # LLM 呼叫自動重試（指數退避）
 tqdm>=4.66.0                      # 進度條（embedding 批次處理）
 typing-extensions>=4.10.0         # TypedDict 等型別擴充（Python < 3.12 兼容）
 
+# ── 混合檢索（Hybrid Retrieval：BM25 + Vector + RRF）─────────────────────────
+rank_bm25>=0.2.2                  # 詞袋稀疏檢索（補強向量檢索的關鍵字精確匹配）
+jieba>=0.42                       # 中文分詞（BM25 tokenization）
+
 # ── 選用：LlamaParse（表格 PDF 補救，免費額度 1000頁/天）──────────────────────
 # 若不需要表格補救功能可不安裝，系統會自動降級到 pdfplumber
 # llama-parse>=0.5.0

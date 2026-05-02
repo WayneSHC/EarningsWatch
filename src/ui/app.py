@@ -237,10 +237,46 @@ with st.sidebar:
     use_cache = st.toggle("使用 Demo 快取（API 呼叫失敗時的保底）", value=False)
 
     st.caption("⚠ 此工具為文件分析平台，不提供選股建議或股價預測")
-    # [d] 顯示目前 LLM 後端，方便 Demo 時確認環境、也符合透明度要求
+    # [d] [S1] LLM 後端切換器：Demo 時可即時比較不同 LLM 的輸出品質與速度
+    # 只列出實際有 API Key 的後端，避免使用者選到沒設定的選項
     try:
-        from src.core.llm_client import which_backend
-        st.caption(f"🤖 LLM：{which_backend()}")
+        from src.core.llm_client import (
+            which_backend, available_backends, set_backend, _detect_backend,
+        )
+        _avail = available_backends()
+        if _avail:
+            _current = _detect_backend()
+            _labels = {
+                "anthropic": "Claude", "openai": "OpenAI",
+                "gemini": "Gemini", "groq": "Groq", "cohere": "Cohere",
+            }
+            _options = [f"{_labels.get(b, b)} ({b})" for b in _avail]
+            _idx = _avail.index(_current) if _current in _avail else 0
+            _picked = st.selectbox(
+                "🤖 LLM 後端",
+                options=_options,
+                index=_idx,
+                help="切換不同 LLM 後端，比較 Demo 品質與速度。僅顯示已設定 API Key 的選項。",
+                key="llm_backend_picker",
+            )
+            _picked_backend = _avail[_options.index(_picked)]
+            if _picked_backend != _current:
+                try:
+                    set_backend(_picked_backend)
+                    st.success(f"已切換至 {_labels.get(_picked_backend, _picked_backend)}")
+                except ValueError as e:
+                    st.error(f"切換失敗：{e}")
+            # 顯示完整模型名（demo mode）
+            _info = which_backend()
+            if _info and not _info.startswith("❌"):
+                st.caption(f"目前：{_info}")
+    except Exception:
+        pass
+
+    # [S4] LangSmith tracing 狀態（透明度 / Demo 觀測用）
+    try:
+        from src.agent.graph import tracing_status
+        st.caption(tracing_status())
     except Exception:
         pass
 
@@ -366,6 +402,7 @@ if run_btn:
                     "confidence": 1.0,
                     "iteration": 0,
                     "reflection_issues": [],
+                    "reflection_gaps": [],
                     "final_report": "",
                     "steps_log": [],
                 }

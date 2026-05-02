@@ -18,7 +18,7 @@ from typing import Any
 from src.agent.state import AgentState
 from src.agent.tools import decide_tools, search_news, get_stock_price
 from src.core.retriever import retrieve, get_company_quarters, retrieve_coverage
-from src.core.contradiction import batch_detect, detect_promises
+from src.core.contradiction import batch_detect, detect_promises, _extract_json
 from src.core.llm_client import chat as llm_chat
 
 
@@ -51,9 +51,8 @@ def intent_classifier(state: AgentState) -> dict:
   "quarters": ["2024Q1", "2024Q3"] 或 [] 代表全部
 }}""", max_tokens=200)
         try:
-            # 防呆：re.search 若回傳 None（LLM 未輸出 JSON），先檢查再呼叫 .group()
-            m = re.search(r'\{.*\}', resp, re.DOTALL)
-            parsed = json.loads(m.group()) if m else {}
+            # [b] 統一用 _extract_json，支援 markdown fence / 巢狀結構，比 re.search 穩
+            parsed = _extract_json(resp) or {}
             company = company or parsed.get("company", "台積電")
             topic = topic or parsed.get("topic", "")
             quarters = quarters or parsed.get("quarters", [])
@@ -67,40 +66,103 @@ def intent_classifier(state: AgentState) -> dict:
 # ══════════════════════════════════════════════════════════════════════════════
 # 節點 2：Query Decomposer
 # ══════════════════════════════════════════════════════════════════════════════
+_DEFAULT_SUB_QUERIES_TEMPLATE = [
+    {"id": "cross_quarter", "purpose": "跨季發言比對", "tool": "qdrant"},
+    {"id": "guidance", "purpose": "財務指引與承諾追蹤", "tool": "qdrant", "section_filter": "guidance"},
+    {"id": "news", "purpose": "即時新聞背景", "tool": "tavily"},
+]
+
+
+def _fallback_sub_queries(company: str, topic: str) -> list[dict]:
+    """LLM 失敗時的保底拆解（與舊版相同的 3 條樣板）。"""
+    return [
+        {**_DEFAULT_SUB_QUERIES_TEMPLATE[0], "query": f"{company} {topic} 發言 各季比對"},
+        {**_DEFAULT_SUB_QUERIES_TEMPLATE[1], "query": f"{company} {topic} 預估 指引 guidance"},
+        {**_DEFAULT_SUB_QUERIES_TEMPLATE[2], "query": f"{company} {topic} 最新動態"},
+    ]
+
+
 def query_decomposer(state: AgentState) -> dict:
     """
-    將問題拆解為三條子任務：
-    1. 各季發言查詢（知識庫）
-    2. 財務數字查詢（知識庫 guidance 段落）
-    3. 即時新聞背景（Tavily，若有相關）
+    [A1] LLM 驅動的子問題拆解：根據實際問題語意產生 2~5 條子查詢，
+    而非套用固定樣板。LLM 失敗時降級為樣板。
+
+    每條子查詢需指定：
+      - query: 實際送進 retriever / Tavily 的查詢字串
+      - purpose: 該子查詢要解決的問題（log 顯示）
+      - tool: "qdrant" 或 "tavily"
+      - section_filter: 選填，限制 Qdrant section（如 "guidance"）
     """
-    # [b] 用 .get() 防呆：若 intent_classifier 因 LLM 失敗未回傳欄位，不引發 KeyError
     company = state.get("company", "")
     topic   = state.get("topic", "")
     query   = state.get("query", "")
-    log = [f"📋 **分解子問題**"]
+    quarters = state.get("quarters", []) or []
+    log = [f"📋 **分解子問題**（LLM 驅動）"]
 
-    sub_queries = [
-        {
-            "id": "cross_quarter",
-            "query": f"{company} {topic} 發言 各季比對",
-            "purpose": "跨季發言比對",
-            "tool": "qdrant",
-        },
-        {
-            "id": "guidance",
-            "query": f"{company} {topic} 預估 指引 guidance",
-            "purpose": "財務指引與承諾追蹤",
-            "tool": "qdrant",
-            "section_filter": "guidance",
-        },
-        {
-            "id": "news",
-            "query": f"{company} {topic} 最新動態",
-            "purpose": "即時新聞背景",
-            "tool": "tavily",
-        },
-    ]
+    # [b] 把使用者選的季度 / 推導出的年份範圍餵進 prompt，
+    #     避免 LLM 在 query 字串裡自行套用「2024」這類預設年份。
+    if quarters:
+        years = sorted({q[:4] for q in quarters if isinstance(q, str) and len(q) >= 4})
+        scope_str = f"季度範圍：{', '.join(quarters)}（年份：{', '.join(years) or '未知'}）"
+    else:
+        scope_str = "季度範圍：使用者未指定 → 應做全部季度的跨季比對，子查詢 query 字串「不要」寫入任何特定年份"
+
+    prompt = f"""你是財務分析師。將下列問題拆解為 2~5 條子查詢，覆蓋不同分析角度（跨季比對、財務指引、競爭/產業背景、最新動態等）。
+
+公司：{company}
+主題：{topic}
+{scope_str}
+原始問題：{query}
+
+只回傳 JSON（不要其他文字）：
+{{
+  "sub_queries": [
+    {{
+      "id": "唯一識別字串（英數）",
+      "query": "送進向量檢索或新聞 API 的實際查詢字串（中文，10~30字）",
+      "purpose": "這條子查詢的目的（10字內）",
+      "tool": "qdrant 或 tavily",
+      "section_filter": "guidance 或 留空字串"
+    }}
+  ]
+}}
+
+要求：
+- 至少包含 1 條 qdrant 子查詢做跨季比對
+- 若主題涉及財務數字（毛利率/營收/產能），加入 1 條 section_filter=\"guidance\" 的子查詢
+- 若問題涉及「最新/近期/市場」，加入 1 條 tavily 子查詢
+- query 字串要包含公司名與主題，不要太籠統
+- 「query 字串」中若需提到時間，必須使用上方「季度範圍」中的實際季度或年份；嚴禁自行寫入「2024」「2023」等未列出的年份
+"""
+
+    sub_queries: list[dict] = []
+    try:
+        raw = _llm(prompt, max_tokens=400)
+        parsed = _extract_json(raw)
+        candidates = parsed.get("sub_queries", []) if isinstance(parsed, dict) else []
+        for sq in candidates:
+            if not isinstance(sq, dict):
+                continue
+            q_str = str(sq.get("query", "")).strip()
+            tool = str(sq.get("tool", "qdrant")).strip().lower()
+            if not q_str or tool not in ("qdrant", "tavily"):
+                continue
+            entry = {
+                "id": str(sq.get("id", f"sq_{len(sub_queries)}")),
+                "query": q_str[:120],  # [f] 防 prompt 爆量
+                "purpose": str(sq.get("purpose", ""))[:40] or "子查詢",
+                "tool": tool,
+            }
+            sf = str(sq.get("section_filter", "")).strip()
+            if sf:
+                entry["section_filter"] = sf
+            sub_queries.append(entry)
+    except Exception as e:
+        log.append(f"  ⚠ LLM 拆解失敗（{type(e).__name__}），降級為樣板")
+
+    if not sub_queries:
+        sub_queries = _fallback_sub_queries(company, topic)
+        log.append("  → 使用樣板拆解")
 
     for sq in sub_queries:
         log.append(f"  → [{sq['purpose']}] {sq['query']}")
@@ -113,10 +175,12 @@ def query_decomposer(state: AgentState) -> dict:
 # ══════════════════════════════════════════════════════════════════════════════
 def dynamic_tool_router(state: AgentState) -> dict:
     """
-    決定本次查詢需要哪些工具（知識庫 / Tavily / yfinance）。
+    [A2] LLM 驅動的工具選擇（知識庫 / Tavily / yfinance）。
+    decide_tools 內部以工具規格表（TOOL_SPECS）讓 LLM 判斷工具相關性，
+    LLM 失敗時自動降級為關鍵字匹配。
     """
     tools = decide_tools(state["query"], state["topic"])
-    log = [f"🔧 **工具選擇**：{', '.join(tools)}"]
+    log = [f"🔧 **工具選擇**（LLM 規劃）：{', '.join(tools)}"]
     return {"tool_plan": tools, "steps_log": log}
 
 
@@ -135,10 +199,29 @@ def parallel_retrieval(state: AgentState) -> dict:
     quarters_filter = state.get("quarters", []) or None
     tool_plan = state.get("tool_plan", ["qdrant"])
     sub_queries = state.get("sub_queries", [])
+    iteration = state.get("iteration", 0)
 
     retrieved: dict[str, list[dict]] = {}
     news_context: list[dict] = []
     stock_data: dict = {}
+
+    # [R4] 自適應 top_k：依問題範圍調整每條 sub_query 取回的 chunk 數
+    #   - 跨季比對需要更多 chunks 餵給 Contradiction Detector
+    #   - 重試輪（iteration > 0）擴大搜尋範圍，提高補強成功率
+    #   - 上限 12 防止單次檢索 payload 過大
+    def _adaptive_top_k(sq: dict) -> int:
+        base = 5
+        # 跨季比對：依使用者選的季度數放大（無指定時假設最多比 6 季）
+        if sq.get("id") == "cross_quarter" or not sq.get("section_filter"):
+            n_quarters = len(quarters_filter) if quarters_filter else 6
+            base = max(5, min(10, n_quarters + 2))
+        # guidance 類查詢通常 chunk 集中，3~4 已足夠
+        if sq.get("section_filter") == "guidance":
+            base = 4
+        # 重試時擴大搜尋（給 reflect-driven gap 查詢更多候選）
+        if iteration > 0:
+            base = min(12, base + 2)
+        return base
 
     # ── 定義各工具的任務函式 ──────────────────────────────────────────
     def _do_qdrant(sq: dict) -> list[dict]:
@@ -151,7 +234,7 @@ def parallel_retrieval(state: AgentState) -> dict:
             company=company,
             quarters=sq_quarters,
             section=sq.get("section_filter"),
-            top_k=5,
+            top_k=_adaptive_top_k(sq),
         )
 
     def _do_tavily() -> list[dict]:
@@ -272,44 +355,117 @@ def contradiction_detect(state: AgentState) -> dict:
 # ══════════════════════════════════════════════════════════════════════════════
 # 節點 6：Self-Reflection
 # ══════════════════════════════════════════════════════════════════════════════
-def self_reflect(state: AgentState) -> dict:
+def _hard_floor_checks(retrieved: dict, contradictions: list) -> tuple[float, list[str]]:
     """
-    評估回答品質，決定是否需要重查。
-    信心度 < 0.75 且迭代次數 < 3 → 觸發重新檢索。
-
-    這是證明 Agentic 架構的關鍵機制：系統真的在自我評估。
+    [A4] LLM judge 之外的硬性檢查，作為 floor。
+    LLM 若給高分但這些底線不滿足，仍視為低品質。
+    回傳 (penalty, issues)：penalty 為扣分，issues 為人類可讀的問題清單。
     """
-    log = ["🤔 **自我評估**"]
-    score = 1.0
-    issues = []
-    retrieved = state.get("retrieved", {})
-    contradictions = state.get("contradictions", [])
-
-    # 檢查 1：跨季資料是否足夠
+    penalty = 0.0
+    issues: list[str] = []
     if len(retrieved) < 2:
         issues.append("只找到 1 季資料，需要至少 2 季才能跨季比對")
-        score -= 0.4
-
-    # 檢查 2：矛盾偵測信心度
-    if contradictions:
-        confidences = [
-            c["analysis"].get("confidence", 0.5)
-            for c in contradictions
-            if c.get("analysis")
-        ]
-        if confidences:
-            avg_conf = mean(confidences)
-            if avg_conf < 0.6:
-                issues.append(f"矛盾偵測信心度偏低（{avg_conf:.2f}），結果可能不準確")
-                score -= 0.3
-
-    # 檢查 3：是否有足夠的 chunk
+        penalty += 0.4
     total_chunks = sum(len(v) for v in retrieved.values())
     if total_chunks < 3:
-        issues.append(f"檢索到的相關段落過少（{total_chunks} 個），資訊可能不足")
-        score -= 0.2
+        issues.append(f"檢索到的相關段落過少（{total_chunks} 個）")
+        penalty += 0.2
+    if contradictions:
+        confs = [
+            c["analysis"].get("confidence", 0.5)
+            for c in contradictions if c.get("analysis")
+        ]
+        if confs and mean(confs) < 0.5:
+            issues.append(f"矛盾偵測平均信心度過低（{mean(confs):.2f}）")
+            penalty += 0.2
+    return penalty, issues
 
-    score = max(0.0, round(score, 2))
+
+def self_reflect(state: AgentState) -> dict:
+    """
+    [A4] LLM-as-judge 自我評估：取代規則式扣分。
+    LLM 同時回傳：
+      - score（0~1）：整體可回答度
+      - issues：發現的具體問題
+      - gaps：缺漏的資訊主題（給下一輪 retrieve 當作新 sub_queries 種子）
+
+    [A3] retry 不再用 "+ 詳細說明"，改用 gaps 為每個缺漏主題產生一條新 sub_query。
+
+    保留硬性 floor 檢查（資料量極端不足時即使 LLM 給高分也壓低分數）。
+    """
+    log = ["🤔 **自我評估（LLM judge）**"]
+    retrieved = state.get("retrieved", {})
+    contradictions = state.get("contradictions", [])
+    promises = state.get("promises", [])
+    query = state.get("query", "")
+    company = state.get("company", "")
+    topic = state.get("topic", "")
+    iteration = state.get("iteration", 0)
+
+    # 摘要當前證據（控制 prompt 長度）
+    quarters = sorted(retrieved.keys())
+    chunk_count = sum(len(v) for v in retrieved.values())
+    contradiction_summary = []
+    for c in contradictions[:8]:
+        a = c.get("analysis", {})
+        contradiction_summary.append(
+            f"{c.get('quarter_a')}→{c.get('quarter_b')}: "
+            f"{a.get('stance_change','-')} (conf={a.get('confidence',0):.2f})"
+        )
+
+    prompt = f"""你是嚴謹的研究品管員。評估下列分析是否足以回答使用者問題。
+
+使用者問題：{query}
+公司：{company}　主題：{topic}
+已檢索季度：{quarters}（共 {chunk_count} 段）
+矛盾比對結果：
+{chr(10).join(contradiction_summary) if contradiction_summary else "（無）"}
+承諾追蹤：{len(promises)} 條
+
+只回傳 JSON：
+{{
+  "score": 0~1 之間的浮點數（整體回答品質與覆蓋度）,
+  "issues": ["具體問題1", "問題2"],
+  "gaps": ["缺漏的資訊主題，每條 15 字內，retrieve 會用來產生新查詢", ...],
+  "should_retry": true 或 false
+}}
+
+評分準則：
+- 1.0：跨季資料完整、矛盾結論信心度高、能直接回答問題
+- 0.7~0.9：可回答但有小缺漏
+- 0.5~0.7：覆蓋不足或某些立場判斷可疑
+- < 0.5：嚴重資訊不足
+gaps 應指出「retrieve 還沒抓到但對回答有幫助」的主題（如：缺乏 2024Q4 毛利率展望、未涵蓋 AI 產能 capex 規劃）。最多 4 條。
+"""
+
+    score = 0.6
+    issues: list[str] = []
+    gaps: list[str] = []
+    should_retry_llm = False
+    try:
+        raw = _llm(prompt, max_tokens=400)
+        parsed = _extract_json(raw)
+        if isinstance(parsed, dict):
+            try:
+                score = float(parsed.get("score", 0.6))
+            except (TypeError, ValueError):
+                score = 0.6
+            score = max(0.0, min(1.0, score))
+            issues = [str(x)[:120] for x in (parsed.get("issues") or []) if x][:5]
+            gaps = [str(x)[:60] for x in (parsed.get("gaps") or []) if x][:4]
+            should_retry_llm = bool(parsed.get("should_retry", False))
+    except Exception as e:
+        log.append(f"  ⚠ LLM judge 失敗（{type(e).__name__}），降級為硬性檢查")
+
+    # Floor：硬性條件不滿足時壓低分數
+    penalty, hard_issues = _hard_floor_checks(retrieved, contradictions)
+    if penalty > 0:
+        score = max(0.0, score - penalty)
+        for hi in hard_issues:
+            if hi not in issues:
+                issues.append(hi)
+
+    score = round(score, 2)
 
     if issues:
         log.append(f"  ⚠ 信心度：{score:.2f}，發現 {len(issues)} 個問題：")
@@ -317,21 +473,34 @@ def self_reflect(state: AgentState) -> dict:
             log.append(f"    - {issue}")
     else:
         log.append(f"  ✅ 信心度：{score:.2f}，品質達標")
+    if gaps:
+        log.append(f"  📌 缺漏主題：{gaps}")
 
-    # 若需重查，擴展搜尋關鍵字
+    # [A3] 用 gaps 構造新 sub_queries（取代盲目加「詳細說明」）
     new_sub_queries = state.get("sub_queries", [])
-    if score < 0.75:
-        iteration = state.get("iteration", 0)
-        log.append(f"  🔄 觸發重查（第 {iteration + 1} 次），擴展關鍵字...")
-        new_sub_queries = [
-            {**sq, "query": sq["query"] + f" {state.get('topic', '')} 詳細說明"}
-            for sq in new_sub_queries
-        ]
+    do_retry = (score < 0.75 or should_retry_llm) and iteration < 3
+    if do_retry:
+        log.append(f"  🔄 觸發重查（第 {iteration + 1} 次）")
+        if gaps:
+            new_sub_queries = [
+                {
+                    "id": f"gap_{i}",
+                    "query": f"{company} {gap}",
+                    "purpose": f"補強：{gap[:20]}",
+                    "tool": "qdrant",
+                }
+                for i, gap in enumerate(gaps)
+            ]
+            log.append(f"  → 依 gaps 重建 {len(new_sub_queries)} 條 sub_queries")
+        else:
+            # 無 gaps（LLM 失敗）時，保留原 sub_queries（不再加「詳細說明」雜訊）
+            log.append("  → 無 gaps，沿用原 sub_queries 重試")
 
     return {
         "confidence": score,
         "reflection_issues": issues,
-        "iteration": state.get("iteration", 0) + 1,
+        "reflection_gaps": gaps,
+        "iteration": iteration + 1,
         "sub_queries": new_sub_queries,
         "steps_log": log,
     }
@@ -379,9 +548,17 @@ def report_generator(state: AgentState) -> dict:
             sections.append(f"- **立場變化**：{a.get('stance_change', '-')}")
             sections.append(f"- **具體改變**：{a.get('change_detail', '-')}")
             if a.get("evidence_early"):
-                sections.append(f"- **{c['quarter_a']} 原文**：「{a['evidence_early']}」")
+                cite_a = ""
+                if c.get("sources_a"):
+                    s = c["sources_a"][0]
+                    cite_a = f"  ＜{s.get('file','')} p.{s.get('page','?')}＞"
+                sections.append(f"- **{c['quarter_a']} 原文**：「{a['evidence_early']}」{cite_a}")
             if a.get("evidence_later"):
-                sections.append(f"- **{c['quarter_b']} 原文**：「{a['evidence_later']}」")
+                cite_b = ""
+                if c.get("sources_b"):
+                    s = c["sources_b"][0]
+                    cite_b = f"  ＜{s.get('file','')} p.{s.get('page','?')}＞"
+                sections.append(f"- **{c['quarter_b']} 原文**：「{a['evidence_later']}」{cite_b}")
             if a.get("follow_up_question"):
                 sections.append(f"- **💡 建議追問**：{a['follow_up_question']}")
             sections.append("")

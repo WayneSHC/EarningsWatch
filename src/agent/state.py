@@ -33,6 +33,9 @@ class AgentState(TypedDict):
     confidence: float       # Self-Reflection 信心度（0.0 ~ 1.0）
     iteration: int          # 重查次數（最多 3 次）
     reflection_issues: list[str]    # 本輪發現的問題
+    # LLM judge 指出的缺漏資訊主題，retry 時據此產生新的 sub_queries
+    # e.g. ["缺乏 2024Q3 毛利率展望", "未涵蓋 AI 產能擴張時程"]
+    reflection_gaps: list[str]
 
     # ── 輸出 ─────────────────────────────────────────────────────────
     final_report: str       # 最終偵查報告（Markdown 格式）
