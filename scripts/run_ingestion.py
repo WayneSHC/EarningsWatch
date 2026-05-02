@@ -99,6 +99,16 @@ _PATTERN_C = re.compile(
     re.IGNORECASE,
 )
 
+# 格式 D：Hon Hai / Hon_Hai 法說逐字稿（鴻海官方命名）
+#   例：Hon_Hai_1Q22_Results_Chinese.pdf
+#       Hon Hai 1Q25 Results_Chinese_20250514_5223.pdf
+#       Hon_Hai_4Q22_Investor_Conference_Call_Transcript_Chinese.pdf
+#       Hon_Hai_4Q23_Results_Transcript_Chinese(1).pdf
+_PATTERN_D = re.compile(
+    r'^Hon[_ ]Hai[_ ](?P<qnum>[1-4])Q(?P<yr2>\d{2})[_ ](?P<rest>.+)\.pdf$',
+    re.IGNORECASE,
+)
+
 
 def parse_filename(filename: str) -> dict | None:
     """
@@ -191,6 +201,45 @@ def parse_filename(filename: str) -> dict | None:
             "lang":       "E",      # 聯發科英文法說系列
             "source_file": filename,
             "doc_subtype": doctype.replace("_", " "),
+        }
+
+    # ── 格式 D：Hon Hai 法說系列 ──────────────────────────────────────────
+    m = _PATTERN_D.match(filename)
+    if m:
+        qnum = int(m.group("qnum"))
+        yr2  = int(m.group("yr2"))
+        rest = m.group("rest")
+
+        fiscal_year = 2000 + yr2
+        quarter = f"{fiscal_year}Q{qnum}"
+
+        # 鴻海法說實際召開月份（對應財報季）
+        # Q1→5月, Q2→8月, Q3→11月, Q4→隔年3月
+        call_month_map = {
+            1: (fiscal_year,     5),
+            2: (fiscal_year,     8),
+            3: (fiscal_year,    11),
+            4: (fiscal_year + 1, 3),
+        }
+        call_year, call_month = call_month_map[qnum]
+
+        # 若檔名內嵌 YYYYMMDD 日期（如 _20250514_）優先使用精確日期
+        date_m = re.search(r'[_\s](\d{4})(\d{2})(\d{2})[_\s]', rest)
+        exact_date = (
+            f"{date_m.group(1)}-{date_m.group(2)}-{date_m.group(3)}"
+            if date_m else f"{call_year}-{call_month:02d}-01"
+        )
+
+        # 語言判斷：含 "Chinese" → 中文版（M）
+        lang = "M" if "chinese" in rest.lower() else "E"
+
+        return {
+            "company":    "鴻海",
+            "stock_code": "2317",
+            "quarter":    quarter,
+            "date":       exact_date,
+            "lang":       lang,
+            "source_file": filename,
         }
 
     # ── 無法辨識格式 ────────────────────────────────────────────────────────
