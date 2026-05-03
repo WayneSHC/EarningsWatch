@@ -201,7 +201,10 @@ def parallel_retrieval(state: AgentState) -> dict:
     sub_queries = state.get("sub_queries", [])
     iteration = state.get("iteration", 0)
 
-    retrieved: dict[str, list[dict]] = {}
+    # [b] retry 時以前輪結果為基底，避免覆蓋已取到的季度與 chunks
+    retrieved: dict[str, list[dict]] = {
+        q: list(chunks) for q, chunks in state.get("retrieved", {}).items()
+    }
     news_context: list[dict] = []
     stock_data: dict = {}
 
@@ -226,9 +229,9 @@ def parallel_retrieval(state: AgentState) -> dict:
     # ── 定義各工具的任務函式 ──────────────────────────────────────────
     def _do_qdrant(sq: dict) -> list[dict]:
         """單一 qdrant sub_query 的檢索，供 ThreadPoolExecutor 呼叫。"""
-        # cross_quarter 子查詢不套用季度過濾，才能跨季比對
-        # guidance / 其他子查詢則遵守使用者選擇的季度範圍
-        sq_quarters = None if sq["id"] == "cross_quarter" else quarters_filter
+        # [f] 使用者選定季度時，所有子查詢（含 cross_quarter）都必須遵守；
+        # 只有使用者未指定季度（quarters_filter=None）時，cross_quarter 才查全部季度。
+        sq_quarters = quarters_filter
         return retrieve(
             query=sq["query"],
             company=company,
@@ -278,8 +281,11 @@ def parallel_retrieval(state: AgentState) -> dict:
             if kind == "qdrant":
                 for chunk in result:
                     quarter = chunk.get("payload", {}).get("quarter", "unknown")
-                    retrieved.setdefault(quarter, []).append(chunk)
-                    log.append(f"  → [{quarter}] {chunk['payload'].get('content', '')[:60]}...")
+                    # [b] 依 chunk id 去重，避免 retry 輪重複追加相同 chunk
+                    _seen_ids = {c["id"] for c in retrieved.get(quarter, [])}
+                    if chunk.get("id") not in _seen_ids:
+                        retrieved.setdefault(quarter, []).append(chunk)
+                        log.append(f"  → [{quarter}] {chunk['payload'].get('content', '')[:60]}...")
             elif kind == "tavily":
                 news_context = result
                 if news_context:

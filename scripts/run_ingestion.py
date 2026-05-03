@@ -387,6 +387,14 @@ def main() -> None:
     if args.pdf:
         # 支援子路徑（如 2454_MediaTek/2454_1Q24_Earnings_Call_Transcript.pdf）
         target = RAW_PDF_DIR / args.pdf
+        # [f] 確保解析後路徑仍在 RAW_PDF_DIR 內，防止 ../.. 路徑越界讀到任意檔案
+        try:
+            if not target.resolve().is_relative_to(RAW_PDF_DIR.resolve()):
+                print(f"❌ 路徑越界：{args.pdf} 超出 {RAW_PDF_DIR}")
+                sys.exit(1)
+        except ValueError:
+            print(f"❌ 無法解析路徑：{args.pdf}")
+            sys.exit(1)
         if not target.exists():
             print(f"❌ 找不到指定的 PDF：{target}")
             sys.exit(1)
@@ -490,6 +498,14 @@ def main() -> None:
             print(f"  ❌ 失敗：{e}")
             traceback.print_exc()   # 完整堆疊供除錯
             print()
+
+    # ── 清除 BM25 索引快取（新 PDF 已寫入 Qdrant，舊索引已過時）──────────
+    if success_count > 0:
+        try:
+            from src.core.retriever import clear_retriever_cache
+            clear_retriever_cache()
+        except Exception:
+            pass  # ingestion 完成本身不受影響
 
     # ── 最終摘要 ──────────────────────────────────────────────────────────
     print("=" * 60)

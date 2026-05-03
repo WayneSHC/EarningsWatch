@@ -165,39 +165,15 @@ with st.sidebar:
     use_cache = st.toggle("使用 Demo 快取（API 呼叫失敗時的保底）", value=False)
 
     st.caption("⚠ 此工具為文件分析平台，不提供選股建議或股價預測")
-    # [d] [S1] LLM 後端切換器：Demo 時可即時比較不同 LLM 的輸出品質與速度
-    # 只列出實際有 API Key 的後端，避免使用者選到沒設定的選項
+    # [S1] 只顯示目前 LLM 後端資訊（唯讀）。
+    # 不提供切換介面：set_backend() 修改 os.environ 是 process-wide 狀態，
+    # 多使用者環境下任何人切換都會影響其他 session，也可能切到高成本模型。
+    # 若需切換後端，請在 .env 設定 LLM_BACKEND 後重啟服務。
     try:
-        from src.core.llm_client import (
-            which_backend, available_backends, set_backend, _detect_backend,
-        )
-        _avail = available_backends()
-        if _avail:
-            _current = _detect_backend()
-            _labels = {
-                "anthropic": "Claude", "openai": "OpenAI",
-                "gemini": "Gemini", "groq": "Groq", "cohere": "Cohere",
-            }
-            _options = [f"{_labels.get(b, b)} ({b})" for b in _avail]
-            _idx = _avail.index(_current) if _current in _avail else 0
-            _picked = st.selectbox(
-                "🤖 LLM 後端",
-                options=_options,
-                index=_idx,
-                help="切換不同 LLM 後端，比較 Demo 品質與速度。僅顯示已設定 API Key 的選項。",
-                key="llm_backend_picker",
-            )
-            _picked_backend = _avail[_options.index(_picked)]
-            if _picked_backend != _current:
-                try:
-                    set_backend(_picked_backend)
-                    st.success(f"已切換至 {_labels.get(_picked_backend, _picked_backend)}")
-                except ValueError as e:
-                    st.error(f"切換失敗：{e}")
-            # 顯示完整模型名（demo mode）
-            _info = which_backend()
-            if _info and not _info.startswith("❌"):
-                st.caption(f"目前：{_info}")
+        from src.core.llm_client import which_backend
+        _info = which_backend()
+        if _info and not _info.startswith("❌"):
+            st.caption(f"🤖 目前：{_info}")
     except Exception:
         pass
 
@@ -299,7 +275,7 @@ if run_btn:
         query = custom_query.strip() or f"{company} 在「{topic}」方面，各季度發言是否有矛盾或立場轉變？請追蹤承諾兌現情況。"
 
         # 先查快取
-        cached = get_cached_result(company, topic) if use_cache else None
+        cached = get_cached_result(company, topic, quarters, custom_query.strip()) if use_cache else None
         if cached:
             st.success("⚡ 使用快取結果（Demo 保底模式）")
             result = cached
@@ -371,7 +347,7 @@ if run_btn:
 
                 result = accumulated_state
                 progress_bar.progress(100, text="✅ 完成！")
-                save_to_cache(company, topic, result)
+                save_to_cache(company, topic, result, quarters, custom_query.strip())
 
             except Exception as e:
                 # [f] 不對使用者顯示 str(e)，避免洩漏 API key 片段或內部路徑
@@ -379,7 +355,7 @@ if run_btn:
                 print(f"[UI] Agent 執行失敗: {_etype}: {e}")
                 st.error(f"Agent 執行失敗（{_etype}），嘗試載入 Demo 快取...")
                 st.warning("嘗試載入 Demo 快取...")
-                result = get_cached_result(company, topic)
+                result = get_cached_result(company, topic, quarters, custom_query.strip())
                 if not result:
                     st.error("無快取資料，請確認：1) Qdrant Docker 執行中 2) API Keys 已設定 3) PDF 已匯入")
                     st.stop()
@@ -865,7 +841,7 @@ elif last_mode == "single":
                     st.markdown(
                         " ".join(
                             f'<span style="background:#d4edda;border-radius:4px;'
-                            f'padding:2px 8px;margin:2px;display:inline-block">{q}</span>'
+                            f'padding:2px 8px;margin:2px;display:inline-block">{html.escape(q)}</span>'
                             for q in discussed
                         ),
                         unsafe_allow_html=True,
@@ -878,7 +854,7 @@ elif last_mode == "single":
                     st.markdown(
                         " ".join(
                             f'<span style="background:#f0f0f0;color:#888;border-radius:4px;'
-                            f'padding:2px 8px;margin:2px;display:inline-block">{q}</span>'
+                            f'padding:2px 8px;margin:2px;display:inline-block">{html.escape(q)}</span>'
                             for q in not_discussed
                         ),
                         unsafe_allow_html=True,

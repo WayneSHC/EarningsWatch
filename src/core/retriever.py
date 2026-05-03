@@ -130,6 +130,18 @@ def _get_bm25_index(company: str | None, section: str | None) -> tuple[Any, list
     return bm25, chunks
 
 
+def clear_retriever_cache() -> None:
+    """
+    BM25 索引失效：新 PDF 匯入後呼叫，確保下次查詢重建索引。
+
+    注意：Streamlit 與 ingestion script 是不同 process，
+    此函數只能清除當前 process 的快取。
+    若 ingestion 在獨立腳本中執行，Streamlit 服務需重啟才能完整反映新資料。
+    """
+    _get_bm25_index.cache_clear()
+    print("[Retriever] BM25 索引快取已清除，下次查詢將重建")
+
+
 def bm25_search(
     query: str,
     company: str | None = None,

@@ -16,6 +16,7 @@ Demo 保底快取 + XSS 防護字串工具。
 
 from __future__ import annotations
 
+import hashlib
 import html
 import json
 from pathlib import Path
@@ -46,16 +47,34 @@ def load_cache() -> dict:
     return {}
 
 
-def cache_key(company: str, topic: str) -> str:
-    return f"{company}_{topic}"
+def cache_key(
+    company: str,
+    topic: str,
+    quarters: list[str] | None = None,
+    custom_query: str = "",
+) -> str:
+    """[f] 含季度與自訂問題的 MD5 key，換季度或換問題不會命中舊快取。"""
+    raw = f"{company}|{topic}|{sorted(quarters or [])}|{custom_query.strip()}"
+    return hashlib.md5(raw.encode()).hexdigest()
 
 
-def get_cached_result(company: str, topic: str) -> dict | None:
+def get_cached_result(
+    company: str,
+    topic: str,
+    quarters: list[str] | None = None,
+    custom_query: str = "",
+) -> dict | None:
     """命中時回傳完整 cache entry，未命中回傳 None。"""
-    return load_cache().get(cache_key(company, topic))
+    return load_cache().get(cache_key(company, topic, quarters, custom_query))
 
 
-def save_to_cache(company: str, topic: str, result: dict) -> None:
+def save_to_cache(
+    company: str,
+    topic: str,
+    result: dict,
+    quarters: list[str] | None = None,
+    custom_query: str = "",
+) -> None:
     """
     將 Agent 結果寫入 demo cache。
 
@@ -63,7 +82,7 @@ def save_to_cache(company: str, topic: str, result: dict) -> None:
     快取只保留季度 key 列表，下次命中時 UI 不顯示原始 chunks（僅展示分析結果）。
     """
     cache = load_cache()
-    cache[cache_key(company, topic)] = {
+    cache[cache_key(company, topic, quarters, custom_query)] = {
         "final_report":   result.get("final_report", ""),
         "contradictions": result.get("contradictions", []),
         "promises":       result.get("promises", []),
