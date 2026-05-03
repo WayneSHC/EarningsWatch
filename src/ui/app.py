@@ -20,6 +20,7 @@ import os
 import re
 import json
 import time
+import html  # [f] 仍被 app.py 多處 html.escape() 直接使用（XSS 防護）
 from datetime import date
 from dotenv import load_dotenv
 
