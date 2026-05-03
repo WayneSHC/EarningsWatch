@@ -15,9 +15,33 @@ import csv
 import io
 from datetime import date
 
-# ── 字型路徑（macOS 內建 STHeiti；若不存在則 fallback 到英文）──────────────
-_FONT_PATH = "/System/Library/Fonts/STHeiti Light.ttc"
-_FONT_NAME = "STHeiti"
+# ── 中文字型路徑（依平台依序嘗試）─────────────────────────────────────────────
+# [b] 寫死單一路徑會在跨平台部署時出錯：
+#   - macOS（本機開發）：STHeiti
+#   - Streamlit Cloud / Debian/Ubuntu（部署）：透過 packages.txt 裝 fonts-noto-cjk
+#   - Helvetica fallback 不支援中文，會 raise FPDFUnicodeEncodingException → 不可作為降級
+import os as _os
+
+_FONT_CANDIDATES = [
+    # macOS 內建
+    ("STHeiti",      "/System/Library/Fonts/STHeiti Light.ttc"),
+    ("STHeiti",      "/System/Library/Fonts/STHeiti Medium.ttc"),
+    # Linux（Debian/Ubuntu，由 packages.txt 安裝）
+    ("NotoSansCJK",  "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"),
+    ("NotoSansCJK",  "/usr/share/fonts/opentype/noto/NotoSerifCJK-Regular.ttc"),
+    ("NotoSansCJK",  "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc"),
+    # Linux 萬用後備（fonts-arphic-uming / wqy-zenhei 任一）
+    ("WQYZenHei",    "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc"),
+    ("AR PL UMing",  "/usr/share/fonts/truetype/arphic/uming.ttc"),
+]
+
+
+def _resolve_cjk_font() -> tuple[str, str] | None:
+    """回傳 (font_name, path) 若有任一 CJK 字型可用，否則 None。"""
+    for name, path in _FONT_CANDIDATES:
+        if _os.path.exists(path):
+            return name, path
+    return None
 
 
 def _new_pdf():
@@ -25,13 +49,18 @@ def _new_pdf():
     from fpdf import FPDF
     pdf = FPDF()
     pdf.set_auto_page_break(auto=True, margin=15)
-    try:
-        pdf.add_font(_FONT_NAME, "", _FONT_PATH)
-        pdf.add_font(_FONT_NAME, "B", _FONT_PATH)   # bold 也用同一字型
-        _font = _FONT_NAME
-    except Exception:
-        _font = "Helvetica"           # 無中文字型時降級
-    return pdf, _font
+
+    found = _resolve_cjk_font()
+    if found is None:
+        # [b] 沒有任何 CJK 字型 → 直接 raise，避免後續 Helvetica 寫入中文時的隱晦錯誤
+        raise RuntimeError(
+            "找不到中文字型（已嘗試 STHeiti / NotoSansCJK / WQYZenHei / AR PL UMing）。"
+            "macOS 應已內建；Linux 部署請在 packages.txt 加入 fonts-noto-cjk。"
+        )
+    font_name, font_path = found
+    pdf.add_font(font_name, "", font_path)
+    pdf.add_font(font_name, "B", font_path)   # bold 也用同一字型
+    return pdf, font_name
 
 
 def _pdf_title(pdf, font: str, text: str, size: int = 16) -> None:
