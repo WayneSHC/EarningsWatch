@@ -11,7 +11,6 @@ EarningsWatch Streamlit 主介面
 
 # ── 修正 Streamlit 工作目錄問題（確保 src/ 可被 import）──────────────────────
 import sys
-import html          # [f] 用於 html.escape()，防止 XSS 注入
 from pathlib import Path
 _PROJECT_ROOT = Path(__file__).parent.parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
@@ -28,6 +27,18 @@ load_dotenv(_PROJECT_ROOT / ".env")
 
 import streamlit as st
 
+# UI 子模組（純函數、無 session 耦合）
+from src.ui.styles import CUSTOM_CSS
+from src.ui.auth import require_password
+from src.ui.cache import (
+    sanitize_str as _sanitize_str,    # [f] 既有呼叫點命名保留 _sanitize_str
+    load_cache,
+    cache_key,
+    get_cached_result,
+    save_to_cache,
+    CACHE_PATH,
+)
+
 # ── 頁面設定（必須在其他 st 呼叫之前）─────────────────────────────────────
 st.set_page_config(
     page_title="EarningsWatch｜法說會一致性審計",
@@ -36,38 +47,11 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# ── 自訂 CSS ─────────────────────────────────────────────────────────────────
-st.markdown("""
-<style>
-.contradiction-card {
-    background: #fff3cd;
-    border-left: 4px solid #ffc107;
-    padding: 12px 16px;
-    border-radius: 4px;
-    margin: 8px 0;
-}
-.ok-card {
-    background: #d4edda;
-    border-left: 4px solid #28a745;
-    padding: 12px 16px;
-    border-radius: 4px;
-    margin: 8px 0;
-}
-.step-log {
-    font-family: monospace;
-    font-size: 13px;
-    background: #f8f9fa;
-    padding: 8px 12px;
-    border-radius: 4px;
-    margin: 2px 0;
-}
-</style>
-""", unsafe_allow_html=True)
+st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 
 # ── 常數 ─────────────────────────────────────────────────────────────────────
 COMPANIES = ["台積電", "聯發科", "鴻海", "台達電"]
 TOPICS = ["AI需求", "毛利率", "產能與擴產", "庫存狀況", "市場展望", "CoWoS"]
-CACHE_PATH = _PROJECT_ROOT / "cache" / "demo_cache.json"
 
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -132,66 +116,9 @@ def get_available_quarters() -> list[str]:
             "2024Q2", "2024Q3", "2024Q4",
             "2025Q1", "2025Q2", "2025Q3", "2025Q4", "2026Q1"]
 
-# ── Demo 快取（保底機制）─────────────────────────────────────────────────────
-def _sanitize_str(val) -> str:
-    """
-    [f] 對任意值套用 html.escape，防止 XSS。
-    只要最終會插入 HTML（unsafe_allow_html=True）的字串都必須經過此函數。
-    """
-    return html.escape(str(val)) if val is not None else ""
-
-
-def load_cache() -> dict:
-    if CACHE_PATH.exists():
-        try:
-            return json.loads(CACHE_PATH.read_text(encoding="utf-8"))
-        except Exception:
-            pass
-    return {}
-
-def cache_key(company: str, topic: str) -> str:
-    return f"{company}_{topic}"
-
-def get_cached_result(company: str, topic: str) -> dict | None:
-    cache = load_cache()
-    return cache.get(cache_key(company, topic))
-
-def save_to_cache(company: str, topic: str, result: dict) -> None:
-    cache = load_cache()
-    cache[cache_key(company, topic)] = {
-        "final_report":  result.get("final_report", ""),
-        "contradictions":result.get("contradictions", []),
-        "promises":      result.get("promises", []),
-        "steps_log":     result.get("steps_log", []),
-        "confidence":    result.get("confidence", 0.0),
-        # Agentic RAG 展示欄位（新增）
-        "iteration":     result.get("iteration", 1),
-        "tool_plan":     result.get("tool_plan", ["qdrant"]),
-        "news_context":  result.get("news_context", []),
-        "stock_data":    result.get("stock_data", {}),
-        "sub_queries":   result.get("sub_queries", []),
-        "node_timings":  result.get("node_timings", {}),
-        # retrieved 含完整向量 chunks，體積大，快取只存季度清單
-        "retrieved":     {q: [] for q in result.get("retrieved", {})},
-    }
-    CACHE_PATH.parent.mkdir(exist_ok=True)
-    CACHE_PATH.write_text(json.dumps(cache, ensure_ascii=False, indent=2), encoding="utf-8")
-
-# ── [f] 簡易密碼保護（對外部署時啟用）────────────────────────────────────────
-# 若環境變數 APP_PASSWORD 已設定，則顯示密碼輸入框，未通過不進入頁面。
-# 本機開發不設定 APP_PASSWORD 時，此段自動跳過（不影響開發體驗）。
-_app_password = os.getenv("APP_PASSWORD", "").strip()
-if _app_password:
-    if not st.session_state.get("_authenticated"):
-        st.title("🔒 EarningsWatch")
-        _pwd_input = st.text_input("請輸入存取密碼", type="password", key="_pwd_input")
-        if st.button("確認", type="primary"):
-            if _pwd_input == _app_password:
-                st.session_state["_authenticated"] = True
-                st.rerun()
-            else:
-                st.error("密碼錯誤，請重試")
-        st.stop()  # 未認證時停止渲染後續內容
+# Demo 快取 / sanitize / 密碼閘門：實作位於 src/ui/{cache,auth}.py
+# [f] 密碼閘門：APP_PASSWORD 已設定且未通過 → 此呼叫內部會 st.stop()
+require_password()
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
