@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: Compile + Unit Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install runtime + dev dependencies
+        # Tests stub out network calls, but core modules import these at module load
+        # (e.g. tenacity, langgraph). Need both files installed.
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
+
+      - name: Syntax check (py_compile)
+        # Catches simple parse errors across the whole src/ tree before running tests.
+        # Faster than pytest collection and gives a clean signal for "did the code import".
+        run: |
+          python -m compileall -q src scripts
+
+      - name: Run unit tests
+        # Tests are designed to run without real API keys (network calls are stubbed
+        # via monkeypatch). Conftest sets dummy env vars so module-level code paths
+        # don't blow up.
+        run: |
+          pytest tests/ -v --tb=short

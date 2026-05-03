@@ -1,0 +1,8 @@
+# ══════════════════════════════════════════════════════════════════════════════
+# Development & test dependencies
+# Install with: pip install -r requirements-dev.txt
+# CI uses this; production deploys (Streamlit Cloud) only use requirements.txt
+# ══════════════════════════════════════════════════════════════════════════════
+
+pytest>=8.0.0                     # 測試框架
+pytest-cov>=5.0.0                 # 覆蓋率報告（CI 顯示）
