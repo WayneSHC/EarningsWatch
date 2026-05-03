@@ -20,7 +20,7 @@ load_dotenv()
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, VectorParams
+from qdrant_client.models import Distance, VectorParams, PointStruct
 
 from src.core.qdrant_client import COLLECTION_NAME, VECTOR_SIZE
 
@@ -90,7 +90,12 @@ def migrate():
         if not results:
             break
 
-        cloud.upsert(collection_name=COLLECTION_NAME, points=results)
+        # qdrant-client 1.10+: scroll() 回 Record，upsert() 要 PointStruct → 顯式轉型
+        points = [
+            PointStruct(id=r.id, vector=r.vector, payload=r.payload)
+            for r in results
+        ]
+        cloud.upsert(collection_name=COLLECTION_NAME, points=points)
         total_migrated += len(results)
         pct = total_migrated / local_count * 100 if local_count > 0 else 100
         print(f"  已遷移 {total_migrated} / {local_count} 筆 ({pct:.1f}%)", end="\r")
