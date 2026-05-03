@@ -6,7 +6,7 @@
 # ══════════════════════════════════════════════════════════════════════════════
 
 # ── LLM 後端（至少安裝其中一個，推薦先用 Gemini 免費額度）─────────────────────
-google-generativeai>=0.8.0        # Gemini（免費 1500次/天，開發首選）
+google-genai>=1.0.0               # Gemini（新版 SDK：from google import genai）
 anthropic>=0.40.0                 # Claude 3.5 Sonnet（Demo 最佳品質）
 openai>=1.50.0                    # GPT-4o / GPT-4o-mini
 groq>=0.11.0                      # Llama 3.3 70B（免費高速）

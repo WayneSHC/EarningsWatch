@@ -104,6 +104,12 @@ def migrate():
             break
         offset = next_offset
 
+    # [b] 必要步驟：Cloud 嚴格模式下沒 index 不能 filter，
+    # 漏掉這步整個 retrieval 都會 0 結果。
+    print("\n🔧 建立 payload indexes（company / quarter / section）...")
+    from src.core.qdrant_client import ensure_payload_indexes
+    ensure_payload_indexes(cloud)
+
     print(f"\n✅ 遷移完成！共 {total_migrated} 筆向量已上傳至 Qdrant Cloud")
     print(f"\n下一步：")
     print(f"  1. 在 Streamlit Cloud Secrets 設定：")

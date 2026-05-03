@@ -7,10 +7,15 @@ src/core/qdrant_client.py
 import os
 from functools import lru_cache
 from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, VectorParams
+from qdrant_client.models import Distance, VectorParams, PayloadSchemaType
 
 COLLECTION_NAME = "earnings_calls"
 VECTOR_SIZE = 768   # paraphrase-multilingual-mpnet-base-v2 維度
+
+# [b] 必須建 keyword index 的 payload 欄位。Qdrant Cloud 嚴格模式下，
+#     沒 index 的欄位無法被 filter（會 raise 400 Bad Request）。
+#     本地 Docker 寬鬆，沒 index 也可以 filter，但部署到 Cloud 一定會炸。
+_INDEXED_PAYLOAD_KEYS = ("company", "quarter", "section")
 
 
 @lru_cache(maxsize=1)
@@ -44,6 +49,7 @@ def get_qdrant_client() -> QdrantClient:
 def ensure_collection(client: QdrantClient | None = None) -> None:
     """
     如果 Collection 不存在則建立，已存在則跳過。
+    額外確保 _INDEXED_PAYLOAD_KEYS 都有 keyword index（Cloud 部署必要）。
     """
     client = client or get_qdrant_client()
     existing = {c.name for c in client.get_collections().collections}
@@ -55,6 +61,30 @@ def ensure_collection(client: QdrantClient | None = None) -> None:
         print(f"[Qdrant] Collection '{COLLECTION_NAME}' 已建立")
     else:
         print(f"[Qdrant] Collection '{COLLECTION_NAME}' 已存在，跳過建立")
+    ensure_payload_indexes(client)
+
+
+def ensure_payload_indexes(client: QdrantClient | None = None) -> None:
+    """
+    [b] 確保所有 _INDEXED_PAYLOAD_KEYS 都有 keyword index。
+    Idempotent：已存在的 index 會被跳過，不 raise。
+    Cloud 嚴格模式下沒 index 的欄位 filter 會被 reject（400），
+    所以這必須在每次部署 / migrate 後跑過。
+    """
+    client = client or get_qdrant_client()
+    for key in _INDEXED_PAYLOAD_KEYS:
+        try:
+            client.create_payload_index(
+                collection_name=COLLECTION_NAME,
+                field_name=key,
+                field_schema=PayloadSchemaType.KEYWORD,
+            )
+            print(f"[Qdrant] payload index 已建立: {key}")
+        except Exception as e:
+            # 已存在 → 訊息會包含 "already exists"，視為正常
+            if "already exists" in str(e).lower():
+                continue
+            print(f"[Qdrant] ⚠ 無法建立 {key} index: {type(e).__name__}: {str(e)[:120]}")
 
 
 def health_check() -> bool:
