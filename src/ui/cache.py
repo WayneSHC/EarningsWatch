@@ -19,6 +19,8 @@ from __future__ import annotations
 import hashlib
 import html
 import json
+import os
+import tempfile
 from pathlib import Path
 
 # 專案根目錄（依本檔案位置回推），與 app.py 行為一致
@@ -99,7 +101,17 @@ def save_to_cache(
         "retrieved":      {q: [] for q in result.get("retrieved", {})},
     }
     CACHE_PATH.parent.mkdir(exist_ok=True)
-    CACHE_PATH.write_text(
-        json.dumps(cache, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    # [b] atomic write：先寫 temp file 再 os.replace，
+    # 避免多 session 並行或 process 中斷時留下半截 JSON
+    _data = json.dumps(cache, ensure_ascii=False, indent=2)
+    fd, tmp_path = tempfile.mkstemp(dir=CACHE_PATH.parent, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(_data)
+        os.replace(tmp_path, CACHE_PATH)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise

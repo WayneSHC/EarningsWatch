@@ -266,6 +266,8 @@ if run_btn:
         st.session_state["last_multi_results"] = multi_results
         st.session_state["last_multi_companies"] = list(selected_companies)
         st.session_state["last_multi_topic"] = topic
+        st.session_state["last_multi_quarters"] = quarters
+        st.session_state["last_multi_custom_query"] = custom_query.strip()
         st.session_state["last_mode"] = "multi"
 
     # ══════════════════════════════════════════════════════════════════════
@@ -366,7 +368,12 @@ if run_btn:
 
         # 儲存至 session_state，供重渲染時使用
         st.session_state["last_result"] = result
-        st.session_state["last_meta"] = {"company": company, "topic": topic}
+        st.session_state["last_meta"] = {
+            "company": company,
+            "topic": topic,
+            "quarters": quarters,
+            "custom_query": custom_query.strip(),
+        }
         st.session_state["last_mode"] = "single"
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -382,6 +389,8 @@ if last_mode == "multi":
     multi_results     = st.session_state["last_multi_results"]
     _companies        = st.session_state["last_multi_companies"]
     _topic            = st.session_state["last_multi_topic"]
+    _m_quarters       = st.session_state.get("last_multi_quarters", [])
+    _m_custom_query   = st.session_state.get("last_multi_custom_query", "")
 
     st.success("✅ 分析完成")
     st.divider()
@@ -534,7 +543,8 @@ if last_mode == "multi":
     _fname_base = f"EarningsWatch_{'_vs_'.join(_companies)}_{_topic}_{date.today()}"
 
     # ── PDF 快取：只在結果改變時重新生成，避免每次重渲染都重算 ──────────────
-    _pdf_cache_key = f"multi_pdf_{'_'.join(_companies)}_{_topic}"
+    # [b] 納入 quarters / custom_query，換查詢維度後強制重建 PDF
+    _pdf_cache_key = f"multi_pdf_{cache_key('_'.join(_companies), _topic, _m_quarters, _m_custom_query)}"
     if st.session_state.get("_pdf_cache_key") != _pdf_cache_key:
         st.session_state["_multi_pdf_bytes"] = None
         st.session_state["_pdf_cache_key"] = _pdf_cache_key
@@ -569,10 +579,12 @@ if last_mode == "multi":
 
 # ── 單公司結果 ─────────────────────────────────────────────────────────────
 elif last_mode == "single":
-    result   = st.session_state["last_result"]
-    _meta    = st.session_state["last_meta"]
-    _company = _meta["company"]
-    _topic   = _meta["topic"]
+    result        = st.session_state["last_result"]
+    _meta         = st.session_state["last_meta"]
+    _company      = _meta["company"]
+    _topic        = _meta["topic"]
+    _s_quarters   = _meta.get("quarters", [])
+    _s_custom_query = _meta.get("custom_query", "")
 
     st.divider()
 
@@ -962,7 +974,8 @@ elif last_mode == "single":
     _fname_base = f"EarningsWatch_{_company}_{_topic}_{date.today()}"
 
     # ── PDF 快取：只在結果改變時重新生成，避免每次重渲染都重算 ──────────────
-    _pdf_cache_key = f"single_pdf_{_company}_{_topic}"
+    # [b] 納入 quarters / custom_query，換查詢維度後強制重建 PDF
+    _pdf_cache_key = f"single_pdf_{cache_key(_company, _topic, _s_quarters, _s_custom_query)}"
     if st.session_state.get("_pdf_cache_key") != _pdf_cache_key:
         st.session_state["_single_pdf_bytes"] = None
         st.session_state["_pdf_cache_key"] = _pdf_cache_key

@@ -201,12 +201,13 @@ def parallel_retrieval(state: AgentState) -> dict:
     sub_queries = state.get("sub_queries", [])
     iteration = state.get("iteration", 0)
 
-    # [b] retry 時以前輪結果為基底，避免覆蓋已取到的季度與 chunks
+    # [b] retry 時以前輪結果為基底，避免覆蓋已取到的資料；
+    # 新一輪若工具成功則覆寫，失敗時保留舊值
     retrieved: dict[str, list[dict]] = {
         q: list(chunks) for q, chunks in state.get("retrieved", {}).items()
     }
-    news_context: list[dict] = []
-    stock_data: dict = {}
+    news_context: list[dict] = list(state.get("news_context") or [])
+    stock_data: dict = dict(state.get("stock_data") or {})
 
     # [R4] 自適應 top_k：依問題範圍調整每條 sub_query 取回的 chunk 數
     #   - 跨季比對需要更多 chunks 餵給 Contradiction Detector
@@ -282,7 +283,8 @@ def parallel_retrieval(state: AgentState) -> dict:
                 for chunk in result:
                     quarter = chunk.get("payload", {}).get("quarter", "unknown")
                     # [b] 依 chunk id 去重，避免 retry 輪重複追加相同 chunk
-                    _seen_ids = {c["id"] for c in retrieved.get(quarter, [])}
+                    # c.get("id") 而非 c["id"]，容忍缺 id 的邊緣資料不 KeyError
+                    _seen_ids = {c.get("id") for c in retrieved.get(quarter, [])}
                     if chunk.get("id") not in _seen_ids:
                         retrieved.setdefault(quarter, []).append(chunk)
                         log.append(f"  → [{quarter}] {chunk['payload'].get('content', '')[:60]}...")
