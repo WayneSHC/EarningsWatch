@@ -109,10 +109,19 @@ _PATTERN_D = re.compile(
     re.IGNORECASE,
 )
 
+# 格式 E：台達電 Analyst Meeting（存放於 2308_Delta/ 子目錄）
+#   例：1Q22_Analyst Meeting.pdf
+#       4Q25_Analyst Meeting.pdf
+#   公司判斷：依父目錄名前4碼股票代號（2308 → 台達電）
+_PATTERN_E = re.compile(
+    r'^(?P<qnum>[1-4])Q(?P<yr2>\d{2})[_ ]Analyst[_ ]Meeting\.pdf$',
+    re.IGNORECASE,
+)
 
-def parse_filename(filename: str) -> dict | None:
+
+def parse_filename(filename: str, parent_dir: str = "") -> dict | None:
     """
-    從 PDF 檔名解析 metadata。
+    從 PDF 檔名（及選填的父目錄名）解析 metadata。
     成功回傳：{company, stock_code, quarter, date, lang, source_file, [part]}
     無法辨識回傳 None → 呼叫端記錄後略過。
     """
@@ -239,6 +248,39 @@ def parse_filename(filename: str) -> dict | None:
             "quarter":    quarter,
             "date":       exact_date,
             "lang":       lang,
+            "source_file": filename,
+        }
+
+    # ── 格式 E：{qnum}Q{yr2}_Analyst Meeting.pdf（台達電，依父目錄股票代號判斷）──
+    m = _PATTERN_E.match(filename)
+    if m:
+        qnum = int(m.group("qnum"))
+        yr2  = int(m.group("yr2"))
+
+        # 從父目錄名（如 "2308_Delta"）取出股票代號
+        stock = parent_dir.split("_")[0] if "_" in parent_dir else parent_dir[:4]
+        company = STOCK_CODE_TO_COMPANY.get(stock)
+        if not company:
+            return None  # 父目錄無法對應已知公司
+
+        fiscal_year = 2000 + yr2
+        quarter = f"{fiscal_year}Q{qnum}"
+
+        # 台達電法說召開月份（近似）：Q1→5月, Q2→8月, Q3→11月, Q4→隔年2月
+        call_month_map = {
+            1: (fiscal_year,     5),
+            2: (fiscal_year,     8),
+            3: (fiscal_year,    11),
+            4: (fiscal_year + 1, 2),
+        }
+        call_year, call_month = call_month_map[qnum]
+
+        return {
+            "company":    company,
+            "stock_code": stock,
+            "quarter":    quarter,
+            "date":       f"{call_year}-{call_month:02d}-01",
+            "lang":       "M",   # 台達電 Analyst Meeting 為中文版
             "source_file": filename,
         }
 
@@ -413,8 +455,9 @@ def main() -> None:
     stats = {"no_parse": [], "cached": [], "lang_skip": []}
 
     for pdf_path in candidates:
-        fname = pdf_path.name
-        meta  = parse_filename(fname)
+        fname      = pdf_path.name
+        parent_dir = pdf_path.parent.name  # 格式 E 需要父目錄名（如 "2308_Delta"）
+        meta       = parse_filename(fname, parent_dir=parent_dir)
 
         if meta is None:
             stats["no_parse"].append(fname)
