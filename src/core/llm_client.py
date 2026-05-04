@@ -13,6 +13,7 @@ src/core/llm_client.py
   anthropic → gemini → openai → groq → cohere
 """
 
+import atexit
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
@@ -22,6 +23,19 @@ from functools import lru_cache
 # 環境變數 LLM_TIMEOUT_SECONDS 可覆寫（部署環境網路較快可調低）
 # 預設 45s：覆蓋各後端 cold-start + 高 token 回應情境，但不讓整個 Agent 卡死。
 _DEFAULT_TIMEOUT_SEC = int(os.getenv("LLM_TIMEOUT_SECONDS", "45"))
+
+# ── [c] 全域共用 ThreadPoolExecutor ───────────────────────────────────────────
+# 問題：舊版 _dispatch_with_timeout 每次呼叫都 with ThreadPoolExecutor(max_workers=1)。
+#   (1) 建立/銷毀執行緒有開銷，batch_detect N-1 次呼叫累積明顯。
+#   (2) 更嚴重：context manager 退出時呼叫 shutdown(wait=True)，
+#       即使 future.result(timeout=N) 已超時，__exit__ 仍會阻塞直到底層執行緒完成，
+#       導致 timeout 機制形同虛設！
+# 解法：模組層級 pool + 直接 fut.result(timeout=N)，不持有 executor context。
+# workers 上限：LLM_POOL_WORKERS（預設 8）遠超 batch_detect max_workers=2，不會耗盡。
+_LLM_POOL_WORKERS = int(os.getenv("LLM_POOL_WORKERS", "8"))
+_LLM_TIMEOUT_POOL = ThreadPoolExecutor(max_workers=_LLM_POOL_WORKERS)
+# [b] 程式退出時非阻塞關閉 pool，不卡住正在跑的 LLM 執行緒
+atexit.register(_LLM_TIMEOUT_POOL.shutdown, wait=False)
 
 # 同後端重試次數（僅針對暫時性錯誤）；quota 類直接切後端，不重試
 _MAX_SAME_BACKEND_RETRIES = 1
@@ -147,10 +161,11 @@ def _get_anthropic_client():
     return anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
 
-@lru_cache(maxsize=None)
+@lru_cache(maxsize=8)
 def _get_openai_client(api_key_env: str = "OPENAI_API_KEY", base_url: str | None = None):
-    # [c] maxsize=None（無限快取）：依 (api_key_env, base_url) 參數組合分別快取。
-    #     maxsize=1 只快取最後一組參數，Groq（不同 base_url）與 OpenAI 會互相覆蓋。
+    # [c] maxsize=8（有上限）：依 (api_key_env, base_url) 參數組合快取；
+    #     目前組合數 = 2（OpenAI + Groq），上限 8 已足夠且防止未來動態參數造成記憶體洩漏。
+    #     舊版 maxsize=None 等同無上限，若呼叫端誤傳不同 api_key 字串將無限累積 client 實例。
     import openai
     return openai.OpenAI(api_key=os.getenv(api_key_env), base_url=base_url)
 
@@ -242,23 +257,25 @@ def _dispatch_with_timeout(
     timeout_sec: int = _DEFAULT_TIMEOUT_SEC,
 ) -> str:
     """
-    [b] 在獨立執行緒中執行 _dispatch，強制施加 timeout。
+    [b][c] 在全域 ThreadPoolExecutor 中執行 _dispatch，強制施加 timeout。
 
-    各 SDK 客戶端的 timeout 介面不一致（anthropic 有 timeout= 但 gemini 沒有），
-    用 ThreadPoolExecutor 的 future.result(timeout=N) 是最通用的跨 SDK 解法。
+    使用全域 _LLM_TIMEOUT_POOL 而非每次建立新 executor，原因：
+      1. 避免執行緒建立/銷毀開銷（batch_detect 可能有 N-1 次平行呼叫）。
+      2. 修正舊版 `with ThreadPoolExecutor(...) as executor` 的 shutdown(wait=True) 暗坑：
+         context manager 退出時會阻塞等待底層執行緒，使 timeout 完全失效。
+         改用全域 pool 後，fut.result(timeout=N) 超時直接拋錯，不阻塞主流程。
 
-    注意：timeout 發生時 future 對應的執行緒無法強制取消——它會繼續執行直到
-    SDK 自己回傳或拋錯。這是 Python threading 的限制，但不影響主流程正確性：
-    TimeoutError 已被 chat() 捕捉並切換後端，舊執行緒最終自然結束。
+    注意：timeout 時底層執行緒無法強制取消（Python threading 限制），它會繼續跑到
+    SDK 自行回傳或拋錯，期間佔用一個 pool worker slot。
+    _LLM_POOL_WORKERS=8 >> batch_detect max_workers=2，不會造成 worker 耗盡。
     """
-    with ThreadPoolExecutor(max_workers=1) as executor:
-        fut = executor.submit(_dispatch, backend, prompt, model, max_tokens)
-        try:
-            return fut.result(timeout=timeout_sec)
-        except FutureTimeoutError:
-            raise TimeoutError(
-                f"[LLM] {backend}/{model} 超過 {timeout_sec}s 未回應"
-            )
+    fut = _LLM_TIMEOUT_POOL.submit(_dispatch, backend, prompt, model, max_tokens)
+    try:
+        return fut.result(timeout=timeout_sec)
+    except FutureTimeoutError:
+        raise TimeoutError(
+            f"[LLM] {backend}/{model} 超過 {timeout_sec}s 未回應"
+        )
 
 
 # [b] 視為「換後端比重試更值得」的錯誤訊號：

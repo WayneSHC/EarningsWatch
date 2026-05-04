@@ -12,6 +12,7 @@ import os
 import json
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from html import escape as _he
 from statistics import mean
 from typing import Any
 
@@ -651,29 +652,32 @@ def report_generator(state: AgentState) -> dict:
             sections.append(
                 f"### {icon} {c['quarter_a']} vs {c['quarter_b']}"
             )
-            sections.append(f"- **立場變化**：{a.get('stance_change', '-')}")
-            sections.append(f"- **具體改變**：{a.get('change_detail', '-')}")
+            # [f] defense-in-depth：LLM 回傳字串用 html.escape 處理，
+            #     雖 final_report 目前以 st.markdown()（無 unsafe_allow_html）渲染，
+            #     但提前轉義可防止未來渲染方式改變時的 XSS 風險。
+            sections.append(f"- **立場變化**：{_he(a.get('stance_change', '-'))}")
+            sections.append(f"- **具體改變**：{_he(a.get('change_detail', '-'))}")
             if a.get("evidence_early"):
                 cite_a = ""
                 if c.get("sources_a"):
                     s = c["sources_a"][0]
-                    cite_a = f"  ＜{s.get('file','')} p.{s.get('page','?')}＞"
+                    cite_a = f"  ＜{_he(str(s.get('file','')))} p.{s.get('page','?')}＞"
                 # [f] 模糊匹配通過的引文加 `～` 提示原文措辭可能略有差異
                 fuzzy_a = "～" if a.get("evidence_early_fuzzy") else ""
                 sections.append(
-                    f"- **{c['quarter_a']} 原文**：「{a['evidence_early']}」{fuzzy_a}{cite_a}"
+                    f"- **{c['quarter_a']} 原文**：「{_he(a['evidence_early'])}」{fuzzy_a}{cite_a}"
                 )
             if a.get("evidence_later"):
                 cite_b = ""
                 if c.get("sources_b"):
                     s = c["sources_b"][0]
-                    cite_b = f"  ＜{s.get('file','')} p.{s.get('page','?')}＞"
+                    cite_b = f"  ＜{_he(str(s.get('file','')))} p.{s.get('page','?')}＞"
                 fuzzy_b = "～" if a.get("evidence_later_fuzzy") else ""
                 sections.append(
-                    f"- **{c['quarter_b']} 原文**：「{a['evidence_later']}」{fuzzy_b}{cite_b}"
+                    f"- **{c['quarter_b']} 原文**：「{_he(a['evidence_later'])}」{fuzzy_b}{cite_b}"
                 )
             if a.get("follow_up_question"):
-                sections.append(f"- **💡 建議追問**：{a['follow_up_question']}")
+                sections.append(f"- **💡 建議追問**：{_he(a['follow_up_question'])}")
             sections.append("")
 
     # 承諾追蹤
@@ -682,9 +686,11 @@ def report_generator(state: AgentState) -> dict:
         sections.append("> 未偵測到可追蹤的前瞻承諾")
     else:
         for p in promises:
+            # [f] defense-in-depth：承諾內容與判斷說明來自 LLM，提前轉義
             sections.append(
-                f"- {p['status']} [{p['promise_quarter']} 承諾] **{p['content']}**  \n"
-                f"  後續（{p['followup_quarter']}）：{p['detail']}"
+                f"- {p['status']} [{p['promise_quarter']} 承諾] "
+                f"**{_he(p['content'])}**  \n"
+                f"  後續（{p['followup_quarter']}）：{_he(p['detail'])}"
             )
     sections.append("")
 

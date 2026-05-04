@@ -19,8 +19,10 @@ from tenacity import retry, stop_after_attempt, wait_exponential, RetryError
 from src.core.llm_client import chat as llm_chat
 
 # [f] Evidence Verifier 參數
-_MIN_QUOTE_LEN = 10      # 少於此長度不做驗證（太短的字串易誤判）
-_FUZZY_THRESHOLD = 0.85  # SequenceMatcher ratio 門檻（0.85 = 允許 ~15% 字元差異）
+_MIN_QUOTE_LEN = 10       # 少於此長度不做驗證（太短的字串易誤判）
+_FUZZY_THRESHOLD = 0.85   # SequenceMatcher ratio 門檻（0.85 = 允許 ~15% 字元差異）
+_FUZZY_SOURCE_CAP = 2000  # [c] 模糊比對時來源文本上限；batch_detect 已截斷至此，
+                           #     此處重申作為 belt-and-suspenders，避免直接呼叫時無上限
 
 
 def _unwrap(e: BaseException) -> BaseException:
@@ -67,41 +69,69 @@ def _verify_quote(quote: str, source_text: str) -> tuple[bool, bool]:
         return True, False
 
     # 2. 模糊滑動視窗匹配
-    # 視窗略大於 quote，容忍插入/刪除；步幅 = quote // 3 確保不漏掉重疊區域
+    # [c] 截斷來源文本：SequenceMatcher O(n*m) 複雜度，過長的來源會放大迭代次數；
+    #     batch_detect 已做 _MAX_CONTENT=2000 截斷，此處再守一道確保直接呼叫安全。
+    s_capped = s[:_FUZZY_SOURCE_CAP]
     q_len = len(q)
-    win_size = min(len(s), int(q_len * 1.4) + 10)
-    step = max(1, q_len // 3)
-    for i in range(0, max(1, len(s) - win_size + 2), step):
-        segment = s[i : i + win_size]
+    win_size = min(len(s_capped), int(q_len * 1.4) + 10)
+    # [c] 步幅從 q_len // 3 調整為 q_len // 2：減少約 33% 迭代次數；
+    #     代價是邊緣字元精度微降，但在中文財報文字的實測中影響不顯著。
+    step = max(1, q_len // 2)
+    for i in range(0, max(1, len(s_capped) - win_size + 2), step):
+        segment = s_capped[i : i + win_size]
         if difflib.SequenceMatcher(None, q, segment).ratio() >= _FUZZY_THRESHOLD:
             return True, True
 
     return False, False
 
 
-def _extract_json(text: str) -> dict:
-    """從 LLM 回應中安全萃取 JSON。"""
-    # 嘗試直接 parse
+def _extract_json(text: str) -> dict | list:
+    """
+    從 LLM 回應中安全萃取 JSON，支援 dict {} 與 list [] 兩種根結構。
+
+    [b] 三層 fallback：
+      1. 直接 json.loads（最快路徑）
+      2. markdown fence（```json ... ```）萃取，同時匹配 {}/[]
+      3. 首尾掃描：找最早的 { 或 [，配對最後的 } 或 ]
+    全部失敗時回傳預設 dict（confidence=0 讓 self_reflect 偵測到）。
+    """
+    # 1. 直接 parse
     try:
-        return json.loads(text.strip())
+        result = json.loads(text.strip())
+        if isinstance(result, (dict, list)):
+            return result
     except json.JSONDecodeError:
         pass
-    # 嘗試從 ```json ... ``` 區塊萃取
-    match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', text, re.DOTALL)
+
+    # 2. markdown fence（同時支援 {} 與 []）
+    match = re.search(r'```(?:json)?\s*([{\[].*?[}\]])\s*```', text, re.DOTALL)
     if match:
         try:
-            return json.loads(match.group(1))
+            result = json.loads(match.group(1))
+            if isinstance(result, (dict, list)):
+                return result
         except json.JSONDecodeError:
             pass
-    # 掃描第一個 '{' 到最後一個 '}'，支援巢狀結構
-    # [b] r'\{[^{}]*\}' 只能匹配非巢狀 JSON，改用首尾掃描
-    start = text.find('{')
-    end   = text.rfind('}')
-    if start != -1 and end != -1 and end > start:
+
+    # 3. 首尾掃描：{} 或 []，取先出現者
+    # [b] rfind 確保匹配最外層的閉括號，支援巢狀結構
+    b_start, b_end = text.find('{'), text.rfind('}')
+    a_start, a_end = text.find('['), text.rfind(']')
+    candidates: list[tuple[int, int]] = []
+    if b_start != -1 and b_end > b_start:
+        candidates.append((b_start, b_end))
+    if a_start != -1 and a_end > a_start:
+        candidates.append((a_start, a_end))
+    # 取最早出現的候選（避免陣列外包物件，或物件外包陣列時選錯）
+    candidates.sort(key=lambda x: x[0])
+    for start, end in candidates:
         try:
-            return json.loads(text[start:end + 1])
+            result = json.loads(text[start : end + 1])
+            if isinstance(result, (dict, list)):
+                return result
         except json.JSONDecodeError:
-            pass
+            continue
+
     # 全部失敗，記錄警告並回傳預設值（confidence=0 讓 self_reflect 可偵測）
     print(f"[Contradiction] ⚠ JSON 解析失敗，LLM 原始回應（前200字）：{text[:200]!r}")
     return {
