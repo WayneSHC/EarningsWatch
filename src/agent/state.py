@@ -37,6 +37,12 @@ class AgentState(TypedDict):
     # e.g. ["缺乏 2024Q3 毛利率展望", "未涵蓋 AI 產能擴張時程"]
     reflection_gaps: list[str]
 
+    # ── 分析品質 ──────────────────────────────────────────────────────
+    # {quarter: {chunk_count, max_score, avg_score, source_pages, quote_verified, top_excerpt}}
+    coverage_matrix: dict
+    # True = 三輪後資料仍嚴重不足，report_generator 輸出「資料不足」訊息
+    abstain: bool
+
     # ── 輸出 ─────────────────────────────────────────────────────────
     final_report: str       # 最終偵查報告（Markdown 格式）
 

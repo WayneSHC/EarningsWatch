@@ -8,6 +8,7 @@ Contradiction Detector — 整個系統最關鍵的模組。
   - 回傳結構化 JSON，confidence 分數支援 Self-Reflection 評估
 """
 
+import difflib
 import os
 import json
 import re
@@ -16,6 +17,10 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from tenacity import retry, stop_after_attempt, wait_exponential, RetryError
 
 from src.core.llm_client import chat as llm_chat
+
+# [f] Evidence Verifier 參數
+_MIN_QUOTE_LEN = 10      # 少於此長度不做驗證（太短的字串易誤判）
+_FUZZY_THRESHOLD = 0.85  # SequenceMatcher ratio 門檻（0.85 = 允許 ~15% 字元差異）
 
 
 def _unwrap(e: BaseException) -> BaseException:
@@ -28,6 +33,50 @@ def _unwrap(e: BaseException) -> BaseException:
         except Exception:
             pass
     return e
+
+
+def _verify_quote(quote: str, source_text: str) -> tuple[bool, bool]:
+    """
+    [f] 驗證 LLM 回傳的引文是否真實存在於來源文字中。
+    防止 LLM 幻覺引文污染跨季矛盾分析結論。
+
+    Returns:
+        (verified, is_fuzzy)
+        - (True, False):  精確子串匹配
+        - (True, True):   模糊滑動視窗匹配（ratio ≥ _FUZZY_THRESHOLD）
+        - (False, False): 無法驗證（可能幻覺）
+
+    設計取捨：
+        - 太短的引文（< _MIN_QUOTE_LEN 字元）視為通過，避免短詞誤判。
+        - 模糊匹配使用滑動視窗：寬度 = quote × 1.4，步幅 = quote // 3；
+          容忍標點替換、縮寫展開等小差異，但抓住完全虛構的引文。
+        - 比對前先摺疊空白（換行 / 全形空格），消除排版差異。
+    """
+    if not quote or not source_text:
+        return False, False
+
+    # 正規化：摺疊所有空白字元（換行、tab、全形空格）
+    q = " ".join(quote.strip().split())
+    s = " ".join(source_text.strip().split())
+
+    if len(q) < _MIN_QUOTE_LEN:
+        return True, False  # 太短不驗證，預設通過
+
+    # 1. 精確子串匹配（最快路徑）
+    if q in s:
+        return True, False
+
+    # 2. 模糊滑動視窗匹配
+    # 視窗略大於 quote，容忍插入/刪除；步幅 = quote // 3 確保不漏掉重疊區域
+    q_len = len(q)
+    win_size = min(len(s), int(q_len * 1.4) + 10)
+    step = max(1, q_len // 3)
+    for i in range(0, max(1, len(s) - win_size + 2), step):
+        segment = s[i : i + win_size]
+        if difflib.SequenceMatcher(None, q, segment).ratio() >= _FUZZY_THRESHOLD:
+            return True, True
+
+    return False, False
 
 
 def _extract_json(text: str) -> dict:
@@ -242,6 +291,33 @@ def batch_detect(
                 "follow_up_question": "",
                 "confidence":         0.0,
             }
+
+        # [f] Evidence Verifier：驗證 LLM 引文是否真實存在於來源 chunks。
+        # LLM 可能「合理捏造」一段與原文相似但未出現的句子（hallucination）。
+        # 失敗時：降低 confidence 0.2、清空該引文、標記 verification_failed=True。
+        # 模糊匹配通過時：標記 evidence_{key}_fuzzy=True，報告端可加標注。
+        for ev_key, src_content in (
+            ("evidence_early", stmt_a["content"]),
+            ("evidence_later", stmt_b["content"]),
+        ):
+            quote = analysis.get(ev_key, "")
+            if not quote:
+                continue
+            verified, is_fuzzy = _verify_quote(quote, src_content)
+            if not verified:
+                print(
+                    f"[Contradiction] ⚠ {ev_key} 引文驗證失敗（可能幻覺）"
+                    f"：{quote[:60]!r}"
+                )
+                analysis["confidence"] = round(
+                    max(0.0, analysis.get("confidence", 0.5) - 0.2), 2
+                )
+                analysis[ev_key] = ""
+                analysis["verification_failed"] = True
+            elif is_fuzzy:
+                # 模糊通過：保留引文但標記，讓 UI 可顯示 "~" 提示
+                analysis[f"{ev_key}_fuzzy"] = True
+
         return {
             "quarter_a": q_a,
             "quarter_b": q_b,
