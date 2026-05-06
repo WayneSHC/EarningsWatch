@@ -1,11 +1,14 @@
 """
 Unit tests for src/core/llm_client.py.
 
-Coverage targets the v1.1 multi-backend cascade:
+Coverage targets the multi-backend cascade (post anthropic/groq removal):
   - _detect_backend: explicit override / auto-detect order / no-key error
   - chat() cascade: quota markers trigger fallback, non-quota errors raise
   - Empty prompt rejection
   - set_backend / available_backends
+
+Active backends: openai → gemini → cohere
+Removed: anthropic, groq (no API key)
 """
 import os
 
@@ -20,12 +23,12 @@ from src.core import llm_client as lc
 
 class TestDetectBackend:
     def test_explicit_backend_wins(self, monkeypatch):
-        monkeypatch.setenv("LLM_BACKEND", "anthropic")
+        monkeypatch.setenv("LLM_BACKEND", "gemini")
         lc._detect_backend.cache_clear()
-        assert lc._detect_backend() == "anthropic"
+        assert lc._detect_backend() == "gemini"
 
     def test_auto_detect_follows_order(self, monkeypatch):
-        # Conftest sets openai/gemini/anthropic. _AUTO_DETECT_ORDER starts with openai.
+        # Conftest sets openai/gemini. _AUTO_DETECT_ORDER starts with openai.
         monkeypatch.delenv("LLM_BACKEND", raising=False)
         lc._detect_backend.cache_clear()
         assert lc._detect_backend() == "openai"
@@ -40,20 +43,26 @@ class TestDetectBackend:
     def test_explicit_invalid_falls_back(self, monkeypatch, capsys):
         monkeypatch.setenv("LLM_BACKEND", "no_such_backend")
         lc._detect_backend.cache_clear()
-        # Must not crash; should warn and fall through to auto-detect
+        result = lc._detect_backend()
+        assert result in lc.BACKEND_MODELS
+        assert "不在支援清單" in capsys.readouterr().out
+
+    def test_explicit_anthropic_no_longer_supported(self, monkeypatch, capsys):
+        # anthropic was removed; treat as unknown → warn + fall back
+        monkeypatch.setenv("LLM_BACKEND", "anthropic")
+        lc._detect_backend.cache_clear()
         result = lc._detect_backend()
         assert result in lc.BACKEND_MODELS
         assert "不在支援清單" in capsys.readouterr().out
 
     def test_explicit_backend_missing_key_raises(self, monkeypatch):
-        monkeypatch.setenv("LLM_BACKEND", "groq")  # GROQ_API_KEY not set in conftest
+        monkeypatch.setenv("LLM_BACKEND", "cohere")  # COHERE_API_KEY not set
         lc._detect_backend.cache_clear()
-        with pytest.raises(EnvironmentError, match="GROQ_API_KEY"):
+        with pytest.raises(EnvironmentError, match="COHERE_API_KEY"):
             lc._detect_backend()
 
     def test_no_keys_at_all_raises(self, monkeypatch):
-        for k in ("OPENAI_API_KEY", "GEMINI_API_KEY", "ANTHROPIC_API_KEY",
-                  "GROQ_API_KEY", "COHERE_API_KEY"):
+        for k in ("OPENAI_API_KEY", "GEMINI_API_KEY", "COHERE_API_KEY"):
             monkeypatch.delenv(k, raising=False)
         monkeypatch.delenv("LLM_BACKEND", raising=False)
         lc._detect_backend.cache_clear()
@@ -91,41 +100,32 @@ class TestChatCascade:
             attempts.append(backend)
             if backend == "openai":
                 raise RuntimeError("429: RESOURCE_EXHAUSTED quota exceeded")
-            if backend == "gemini":
-                raise RuntimeError("429 RESOURCE_EXHAUSTED")
             return f"reply from {backend}"
 
         monkeypatch.setattr(lc, "_dispatch", fake_dispatch)
         out = lc.chat("hello")
-        assert out == "reply from anthropic"
-        assert attempts == ["openai", "gemini", "anthropic"]
+        assert out == "reply from gemini"
+        assert attempts == ["openai", "gemini"]
         captured = capsys.readouterr().out
-        assert "openai 配額/認證失敗" in captured
-        assert "gemini 配額/認證失敗" in captured
+        # New friendly message format
+        assert "OpenAI" in captured and ("配額" in captured or "token" in captured)
 
     def test_credit_balance_marker_triggers_fallback(self, monkeypatch):
-        # Anthropic 400 BadRequestError when account has no credits
         attempts = []
 
         def fake_dispatch(backend, prompt, model, max_tokens):
             attempts.append(backend)
             if backend == "openai":
-                return "ok"
-            raise RuntimeError("Your credit balance is too low")
+                raise RuntimeError("Your credit balance is too low")
+            return "ok"
 
         monkeypatch.setattr(lc, "_dispatch", fake_dispatch)
-        # Force primary=anthropic so we hit the credit-balance path
-        monkeypatch.setenv("LLM_BACKEND", "anthropic")
-        lc._detect_backend.cache_clear()
-
         out = lc.chat("hi")
         assert out == "ok"
-        # First anthropic (credit out) → fallback chain reaches openai
-        assert "anthropic" in attempts
-        assert attempts[-1] == "openai"
+        assert attempts[0] == "openai"
+        assert len(attempts) >= 2
 
     def test_404_marker_triggers_fallback(self, monkeypatch):
-        # Wrong model name (e.g. gemini-3-pro vs gemini-3-pro-preview) returns 404
         attempts = []
 
         def fake_dispatch(backend, prompt, model, max_tokens):
@@ -153,18 +153,32 @@ class TestChatCascade:
         assert lc.chat("hi") == "ok"
         assert len(attempts) >= 2
 
-    def test_non_quota_error_raises_immediately(self, monkeypatch):
-        # Network/programming errors should NOT cascade — we want the real error fast
+    def test_rate_limit_429_triggers_fallback(self, monkeypatch):
+        # Newly added: 429 / rate_limit markers
         attempts = []
 
         def fake_dispatch(backend, prompt, model, max_tokens):
             attempts.append(backend)
-            raise RuntimeError("Connection refused by remote host")
+            if backend == "openai":
+                raise RuntimeError("429 Too Many Requests: rate limit reached")
+            return "ok"
 
         monkeypatch.setattr(lc, "_dispatch", fake_dispatch)
-        with pytest.raises(RuntimeError, match="Connection refused"):
+        assert lc.chat("hi") == "ok"
+        assert len(attempts) >= 2
+
+    def test_non_quota_error_raises_immediately(self, monkeypatch):
+        # Truly non-transient, non-quota error → must NOT cascade.
+        # (Avoid words like "connection"/"timeout" which are transient markers.)
+        attempts = []
+
+        def fake_dispatch(backend, prompt, model, max_tokens):
+            attempts.append(backend)
+            raise RuntimeError("JSON schema validation failed: bad payload")
+
+        monkeypatch.setattr(lc, "_dispatch", fake_dispatch)
+        with pytest.raises(RuntimeError, match="JSON schema"):
             lc.chat("hi")
-        # Should fail on first attempt only — no cascade for non-quota errors
         assert attempts == ["openai"]
 
     def test_all_backends_fail_raises_last_error(self, monkeypatch):
@@ -181,15 +195,14 @@ class TestChatCascade:
 # ──────────────────────────────────────────────────────────────────────────
 
 class TestBackendManagement:
-    def test_available_backends_lists_keys_with_env(self, monkeypatch):
-        # Conftest gives us openai/gemini/anthropic
+    def test_available_backends_lists_keys_with_env(self):
+        # Conftest gives us openai + gemini
         out = lc.available_backends()
-        assert set(out) == {"openai", "gemini", "anthropic"}
+        assert set(out) == {"openai", "gemini"}
 
-    def test_available_backends_respects_order(self, monkeypatch):
+    def test_available_backends_respects_order(self):
         out = lc.available_backends()
-        # _AUTO_DETECT_ORDER is openai → gemini → anthropic → groq → cohere
-        assert out == ["openai", "gemini", "anthropic"]
+        assert out == ["openai", "gemini"]
 
     def test_set_backend_clears_cache(self, monkeypatch):
         lc._detect_backend.cache_clear()
@@ -201,10 +214,15 @@ class TestBackendManagement:
         with pytest.raises(ValueError, match="未知後端"):
             lc.set_backend("not_a_backend")
 
+    def test_set_backend_rejects_removed_anthropic(self):
+        # anthropic removed entirely → not in BACKEND_MODELS → "未知後端"
+        with pytest.raises(ValueError, match="未知後端"):
+            lc.set_backend("anthropic")
+
     def test_set_backend_rejects_missing_key(self, monkeypatch):
-        monkeypatch.delenv("GROQ_API_KEY", raising=False)
-        with pytest.raises(ValueError, match="缺少 GROQ_API_KEY"):
-            lc.set_backend("groq")
+        monkeypatch.delenv("COHERE_API_KEY", raising=False)
+        with pytest.raises(ValueError, match="缺少 COHERE_API_KEY"):
+            lc.set_backend("cohere")
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -226,7 +244,8 @@ class TestBackendManagement:
     "does not exist",
     "503 service unavailable",
     "Provider overloaded",
-    "529 overloaded",
+    "429 Too Many Requests",
+    "rate limit exceeded",
 ])
 def test_quota_marker_recognized(monkeypatch, err_msg):
     """All these strings must trigger backend fallback, not raise immediately."""
@@ -241,5 +260,4 @@ def test_quota_marker_recognized(monkeypatch, err_msg):
     monkeypatch.setattr(lc, "_dispatch", fake_dispatch)
     out = lc.chat("hi")
     assert out == "ok"
-    # If marker was recognized → cascade ran → at least 2 attempts
     assert len(attempts) >= 2, f"Marker {err_msg!r} did NOT trigger cascade"

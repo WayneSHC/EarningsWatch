@@ -5,11 +5,9 @@
 # Python 版本：>= 3.10（使用 X | Y 型別語法）
 # ══════════════════════════════════════════════════════════════════════════════
 
-# ── LLM 後端（至少安裝其中一個，推薦先用 Gemini 免費額度）─────────────────────
-google-genai>=1.0.0               # Gemini（新版 SDK：from google import genai）
-anthropic>=0.40.0                 # Claude 3.5 Sonnet（Demo 最佳品質）
-openai>=1.50.0                    # GPT-4o / GPT-4o-mini
-groq>=0.11.0                      # Llama 3.3 70B（免費高速）
+# ── LLM 後端（已移除無 API Key 的 anthropic / groq）─────────────────────────────
+openai>=1.50.0                    # GPT-5o / GPT-5o-mini ★ 主力
+google-genai>=1.0.0               # Gemini 3.0 Flash（新版 SDK：from google import genai）
 cohere>=5.0.0                     # Command R+（同時用於 Rerank）
 
 # ── Agent 框架 ───────────────────────────────────────────────────────────────
