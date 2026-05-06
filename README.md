@@ -102,16 +102,17 @@ python scripts/run_ingestion.py --pdf TSMC\ 2Q24\ Transcript.pdf  # 單一檔案
 
 | 變數 | 必要 | 說明 |
 |---|---|---|
-| `GEMINI_API_KEY` | 擇一 | Google Gemini（免費 1500次/天）✅ 推薦 |
-| `ANTHROPIC_API_KEY` | 擇一 | Claude 3.5 Sonnet |
-| `OPENAI_API_KEY` | 擇一 | GPT-4o |
-| `GROQ_API_KEY` | 擇一 | Llama 3.3 70B（免費）|
-| `COHERE_API_KEY` | 選填 | Rerank API（不填則跳過精排）|
+| `OPENAI_API_KEY` | 擇一 | GPT-5o / GPT-5o-mini ★ 主力 |
+| `GEMINI_API_KEY` | 擇一 | Gemini 3.0 Flash（免費額度大）|
+| `COHERE_API_KEY` | 擇一 | Command R+（同時用於 Rerank）|
 | `TAVILY_API_KEY` | 選填 | 即時新聞搜尋 |
 | `QDRANT_URL` | 選填 | Qdrant Cloud URL（不填用本地 Docker）|
 | `QDRANT_API_KEY` | 選填 | Qdrant Cloud Key |
 | `APP_PASSWORD` | 選填 | 對外部署時設定存取密碼 |
-| `LLM_BACKEND` | 選填 | 強制指定後端（gemini/anthropic/openai/groq/cohere）|
+| `LLM_BACKEND` | 選填 | 強制指定後端（openai / gemini / cohere）|
+
+> 🔄 **自動降級：** 主後端配額用完 / 觸發 429 / 模型下線 / 503 時，會印出友善訊息並自動切到下一個後端（順序：openai → gemini → cohere）。
+> ⛔ **已移除：** anthropic、groq（無 API Key）。
 
 ---
 

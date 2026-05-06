@@ -112,16 +112,16 @@ PDF（data/raw_pdfs/）
 
 ### 5.2 LLM 後端（多後端並列支援）
 
-| 後端 | SDK 版本 | 使用模型（Demo / Dev） | 備註 |
+| 後端 | SDK | 使用模型（Demo / Dev） | 備註 |
 |---|---|---|---|
-| **Gemini** | google-generativeai 0.8.6 / google-genai 1.73.1 | gemini-2.0-flash / gemini-2.0-flash | 免費 1500次/天，預設首選 |
-| **Anthropic** | anthropic 0.97.0 | claude-3-5-sonnet-20241022 / claude-3-haiku-20240307 | Demo 最佳品質 |
-| **OpenAI** | openai 2.32.0 | gpt-4o / gpt-4o-mini | GPT 系列 |
-| **Groq** | groq（OpenAI-compat SDK） | llama-3.3-70b-versatile | 免費高速，OpenAI SDK 相容介面 |
-| **Cohere** | cohere 5.21.1 | command-r-plus-08-2024 / command-r-08-2024 | 同時用於 Rerank |
+| **OpenAI** ★ | openai ≥ 1.50 | gpt-5o / gpt-5o-mini | 主力，2026-05 更新 |
+| **Gemini** | google-genai ≥ 1.0 | gemini-3.0-flash / gemini-3.0-flash | 免費額度大，主力備援 |
+| **Cohere** | cohere ≥ 5.0 | command-r-plus-08-2024 / command-r7b-12-2024 | 同時用於 Rerank |
 
-> 切換方式：設定環境變數 `LLM_BACKEND=gemini`（或 anthropic / openai / groq / cohere）。  
-> 未設定時自動偵測順序：`anthropic → gemini → openai → groq → cohere`
+> ⛔ 已移除：anthropic、groq（無 API Key）。  
+> 切換方式：設定環境變數 `LLM_BACKEND=openai`（或 gemini / cohere）。  
+> 未設定時自動偵測順序：`openai → gemini → cohere`  
+> 🔄 任一後端 quota / 429 rate limit / 401-403 / 404 / 503 → 印出友善中文訊息（例：`⚠️ OpenAI (GPT-5o) 今日 token / 配額已用完，自動切換下一個後端…`）並切換下一個。網路 / timeout 錯誤同後端重試 1 次後再切換。
 
 ### 5.3 向量資料庫
 
@@ -300,12 +300,10 @@ streamlit run src/ui/app.py --server.port 8501
 
 | 變數 | 必要性 | 說明 |
 |---|---|---|
-| `GEMINI_API_KEY` | 至少一個 LLM key | Google Gemini（免費額度，推薦）|
-| `ANTHROPIC_API_KEY` | 至少一個 LLM key | Claude 3.5 Sonnet |
-| `OPENAI_API_KEY` | 至少一個 LLM key | GPT-4o / GPT-4o-mini |
-| `GROQ_API_KEY` | 至少一個 LLM key | Llama 3.3 70B（免費）|
-| `COHERE_API_KEY` | 選用（建議設定）| Command R+（同時用於 Rerank）|
-| `LLM_BACKEND` | 選用 | 強制指定後端（gemini / anthropic / openai / groq / cohere）|
+| `OPENAI_API_KEY` | 至少一個 LLM key ★ | GPT-5o / GPT-5o-mini（主力）|
+| `GEMINI_API_KEY` | 至少一個 LLM key | Gemini 3.0 Flash（免費額度大）|
+| `COHERE_API_KEY` | 至少一個 LLM key | Command R+（同時用於 Rerank）|
+| `LLM_BACKEND` | 選用 | 強制指定後端（openai / gemini / cohere）|
 | `QDRANT_URL` | 選用 | Qdrant Cloud URL（不設則用本地 Docker）|
 | `QDRANT_API_KEY` | 選用 | Qdrant Cloud API Key |
 | `QDRANT_HOST` | 選用 | 本地 Qdrant host（預設 localhost）|

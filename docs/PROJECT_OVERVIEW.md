@@ -193,19 +193,20 @@ python src/agent/graph.py         # 驗證 graph 編譯成功
 
 ### 7.1 必填（擇一）
 
-| 變數 | 取得 | 推薦度 |
-|---|---|---|
-| `GEMINI_API_KEY` | https://aistudio.google.com/apikey | ⭐ 免費 1500/day |
-| `OPENAI_API_KEY` | https://platform.openai.com/api-keys | 收費，但效果最好 |
-| `ANTHROPIC_API_KEY` | https://console.anthropic.com | 收費 |
-| `GROQ_API_KEY` | https://console.groq.com | 免費，速度快 |
-| `COHERE_API_KEY` | https://dashboard.cohere.com | 同時用於 Rerank |
+| 變數 | 模型 | 取得 | 備註 |
+|---|---|---|---|
+| `OPENAI_API_KEY` | GPT-5o / GPT-5o-mini | https://platform.openai.com/api-keys | ⭐ 主力（2026-05 更新） |
+| `GEMINI_API_KEY` | Gemini 3.0 Flash | https://aistudio.google.com/apikey | 免費額度大，主力備援 |
+| `COHERE_API_KEY` | Command R+ | https://dashboard.cohere.com | 同時用於 Rerank |
+
+> ⛔ 已移除：`ANTHROPIC_API_KEY`、`GROQ_API_KEY`（無 API Key 不再支援）。
+> 🔄 自動降級順序：`openai → gemini → cohere`；任一後端 quota / 429 / 401-403 / 404 / 503 → 印出友善中文訊息並切換下一個。
 
 ### 7.2 選填
 
 | 變數 | 用途 |
 |---|---|
-| `LLM_BACKEND` | 強制指定主後端（不填則自動偵測：openai → gemini → anthropic → groq → cohere）|
+| `LLM_BACKEND` | 強制指定主後端（不填則自動偵測：openai → gemini → cohere）|
 | `LLM_PAIR_WORKERS` | 矛盾偵測併發數，預設 2（rate limit 友善）|
 | `QDRANT_URL` / `QDRANT_API_KEY` | 部署 Streamlit Cloud 時用 |
 | `TAVILY_API_KEY` | 啟用即時新聞搜尋 |
