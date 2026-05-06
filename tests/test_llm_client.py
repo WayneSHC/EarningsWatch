@@ -99,7 +99,8 @@ class TestChatCascade:
         def fake_dispatch(backend, prompt, model, max_tokens):
             attempts.append(backend)
             if backend == "openai":
-                raise RuntimeError("429: RESOURCE_EXHAUSTED quota exceeded")
+                # Pure quota error (no "429" → that hits rate-limit branch instead)
+                raise RuntimeError("RESOURCE_EXHAUSTED: quota exceeded")
             return f"reply from {backend}"
 
         monkeypatch.setattr(lc, "_dispatch", fake_dispatch)
@@ -261,3 +262,52 @@ def test_quota_marker_recognized(monkeypatch, err_msg):
     out = lc.chat("hi")
     assert out == "ok"
     assert len(attempts) >= 2, f"Marker {err_msg!r} did NOT trigger cascade"
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# _format_quota_message — friendly Chinese translations
+# ──────────────────────────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("err_msg,expected_phrase", [
+    # 配額類
+    ("RESOURCE_EXHAUSTED quota",          "今日 token / 配額已用完"),
+    ("insufficient_quota",                "今日 token / 配額已用完"),
+    ("Your credit balance is too low",    "今日 token / 配額已用完"),
+    ("billing required",                  "今日 token / 配額已用完"),
+    # Rate limit
+    ("429 Too Many Requests",             "速率限制"),
+    ("rate limit exceeded",               "速率限制"),
+    # 認證
+    ("401 Unauthorized",                  "API Key 失效或權限不足"),
+    ("403 Forbidden",                     "API Key 失效或權限不足"),
+    # 模型不存在
+    ("404 NOT_FOUND",                     "模型名稱不存在或已下線"),
+    ("model_not_found",                   "模型名稱不存在或已下線"),
+    ("does not exist",                    "模型名稱不存在或已下線"),
+    # 服務不可用
+    ("503 service unavailable",           "服務暫時不可用"),
+    ("Provider overloaded",               "服務暫時不可用"),
+    # 通用降級
+    ("Strange undocumented error xyz123", "呼叫失敗"),
+])
+def test_format_quota_message_translation(err_msg, expected_phrase):
+    """每個錯誤標記都應翻譯成正確的中文提示，且包含後端 label。"""
+    out = lc._format_quota_message("openai", err_msg)
+    assert "OpenAI" in out, f"Backend label missing in: {out!r}"
+    assert expected_phrase in out, (
+        f"Marker {err_msg!r} should produce {expected_phrase!r}, got: {out!r}"
+    )
+
+
+def test_format_quota_message_includes_backend_label():
+    """三個後端的 label 都應正確帶出。"""
+    for backend in ("openai", "gemini", "cohere"):
+        out = lc._format_quota_message(backend, "quota exceeded")
+        label = lc._BACKEND_LABEL[backend]
+        assert label in out, f"Backend {backend} label missing: {out!r}"
+
+
+def test_format_quota_message_unknown_backend_falls_back():
+    """未知 backend 不應 KeyError，直接用 backend 名當 label。"""
+    out = lc._format_quota_message("future_backend", "quota exceeded")
+    assert "future_backend" in out

@@ -142,13 +142,37 @@ def _get_cohere_llm_client():
 def _call_openai_compat(prompt: str, model: str, max_tokens: int,
                          base_url: str | None = None,
                          api_key_env: str = "OPENAI_API_KEY") -> str:
-    """OpenAI SDK 相容介面。"""
+    """
+    OpenAI SDK 相容介面。
+
+    [b] 參數相容性：較新模型（gpt-5*、o1 系列）改用 `max_completion_tokens`，
+        舊模型仍接受 `max_tokens`。先試新參數，失敗再退回舊參數，雙向相容。
+        TypeError 通常是 SDK 層 unexpected keyword；BadRequestError 也可能是
+        伺服器端說「請改用 max_completion_tokens」，兩種都重試。
+    """
     client = _get_openai_client(api_key_env, base_url)
-    resp = client.chat.completions.create(
-        model=model,
-        max_tokens=max_tokens,
-        messages=[{"role": "user", "content": prompt}],
-    )
+    base_kwargs = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+    }
+    try:
+        resp = client.chat.completions.create(
+            max_completion_tokens=max_tokens, **base_kwargs
+        )
+    except TypeError:
+        # SDK 不認得 max_completion_tokens（舊 SDK 或舊模型）
+        resp = client.chat.completions.create(
+            max_tokens=max_tokens, **base_kwargs
+        )
+    except Exception as e:
+        # API 回傳「請改用 max_completion_tokens」或「max_tokens not supported」
+        msg = str(e).lower()
+        if "max_completion_tokens" in msg or "max_tokens" in msg:
+            resp = client.chat.completions.create(
+                max_tokens=max_tokens, **base_kwargs
+            )
+        else:
+            raise
     return resp.choices[0].message.content.strip()
 
 
@@ -221,16 +245,28 @@ _BACKEND_LABEL = {
 
 
 def _format_quota_message(backend: str, msg: str) -> str:
-    """[b] 將 quota / 認證錯誤翻譯成使用者看得懂的提示。"""
+    """
+    [b] 將 quota / 認證錯誤翻譯成使用者看得懂的提示。
+
+    順序敏感警告：分支由具體 → 一般。
+      1. rate limit / 429 → 短時間請求過多（必須先於 quota，因為「rate limit exceeded」會被 quota 的 "exceeded" 誤吃）
+      2. quota / billing → 配額用完
+      3. 401 / 403 → 認證失敗
+      4. 404 / not_found → 模型下線
+      5. 503 / overloaded → 服務不可用
+      6. 其他 → 通用降級訊息
+    若未來新增分支，「最具體的條件放最上面」，避免被前面 catch-all 吃掉。
+    """
     label = _BACKEND_LABEL.get(backend, backend)
     msg_lower = msg.lower()
+    # [b] rate-limit 必須在 quota 之前判斷：「rate limit exceeded」含 "exceeded"
+    if any(m in msg_lower for m in ("rate limit", "rate_limit",
+                                     "too many requests", "429")):
+        return f"⚠️  {label} 觸發速率限制（短時間內請求過多），切換下一個後端…"
     if any(m in msg_lower for m in ("quota", "exceeded", "resource_exhausted",
                                      "insufficient_quota", "billing",
                                      "credit", "low balance")):
         return f"⚠️  {label} 今日 token / 配額已用完，自動切換下一個後端…"
-    if any(m in msg_lower for m in ("rate limit", "rate_limit",
-                                     "too many requests", "429")):
-        return f"⚠️  {label} 觸發速率限制（短時間內請求過多），切換下一個後端…"
     if "401" in msg or "403" in msg:
         return f"⚠️  {label} API Key 失效或權限不足，切換下一個後端…"
     if any(m in msg_lower for m in ("404", "not_found", "not found",
