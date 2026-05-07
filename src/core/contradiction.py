@@ -24,6 +24,21 @@ _FUZZY_THRESHOLD = 0.85   # SequenceMatcher ratio 門檻（0.85 = 允許 ~15% �
 _FUZZY_SOURCE_CAP = 2000  # [c] 模糊比對時來源文本上限；batch_detect 已截斷至此，
                            #     此處重申作為 belt-and-suspenders，避免直接呼叫時無上限
 
+# [b] 法律免責聲明 boilerplate 特徵詞（出現任一即視為無主題內容）
+# coverage sweep 以 min_score=0.25 補充缺漏季度時，disclaimer 因出現在每頁
+# 而輕易達到門檻，若不過濾會讓矛盾偵測比較無意義的制式文字。
+_BOILERPLATE_SIGNATURES = (
+    "forward-looking statements subject to significant risks",
+    "actual results may differ materially",
+    "statements of its current expectations are forward-looking",
+)
+
+
+def _is_boilerplate(text: str) -> bool:
+    """偵測是否為法律免責聲明 boilerplate（大小寫不敏感）。"""
+    lower = text.lower()
+    return any(sig in lower for sig in _BOILERPLATE_SIGNATURES)
+
 
 def _unwrap(e: BaseException) -> BaseException:
     """[b] tenacity.RetryError 包住真正的 API 錯誤，UI/log 必須看到底層原因。"""
@@ -284,6 +299,12 @@ def batch_detect(
         # [b] 空內容防呆：兩季都無內容則無法比對，記錄後跳過
         if not content_a.strip() or not content_b.strip():
             print(f"[Contradiction] ⚠ {q_a} 或 {q_b} 內容為空，跳過比對")
+            continue
+
+        # [b] boilerplate 過濾：coverage sweep 可能以低分抓到免責聲明當作主題內容，
+        #     若兩季內容都是制式 disclaimer，比對結果毫無意義，直接跳過。
+        if _is_boilerplate(content_a) and _is_boilerplate(content_b):
+            print(f"[Contradiction] ⚠ {q_a} vs {q_b} 兩季均為法律免責聲明，跳過比對")
             continue
 
         stmt_a = {
