@@ -43,6 +43,13 @@ class AgentState(TypedDict):
     # True = 三輪後資料仍嚴重不足，report_generator 輸出「資料不足」訊息
     abstain: bool
 
+    # ── 成本控制 ──────────────────────────────────────────────────────
+    # intent_classifier 進入時快照當下累計 cost_usd，should_continue 用此計算
+    # 「本次 query 已花費」=（目前累計）-（baseline）。超過 LLM_BUDGET_USD 就停止 retry。
+    cost_baseline_usd: float
+    # True = should_continue 因預算超限而強制結束 retry 迴圈（非信心度達標）
+    cost_guard_triggered: bool
+
     # ── 輸出 ─────────────────────────────────────────────────────────
     final_report: str       # 最終偵查報告（Markdown 格式）
 

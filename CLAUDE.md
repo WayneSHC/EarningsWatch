@@ -88,11 +88,28 @@ Seven nodes in `graph.py`, implemented in `nodes.py`, typed via `state.py`:
 | `reflect` | `self_reflect` | Scores confidence; loops back to `retrieve` (max 3 iterations) |
 | `report` | `report_generator` | Produces final Markdown report |
 
-The conditional edge `reflect → retrieve` (retry) or `reflect → report` (end) is the self-reflection loop.
+The conditional edge `reflect → retrieve` (retry) or `reflect → report` (end) is the self-reflection loop. `should_continue` ends the loop when (a) confidence ≥ 0.75, (b) iteration ≥ 3, or (c) `cost_guard_triggered` is set.
 
 ### Coverage Sweep (`src/core/retriever.py`)
 
 After the initial top-k retrieval, `parallel_retrieval` calls `get_company_quarters()` (Qdrant facet API) then `retrieve_coverage()` for any quarters missing from the result set. Coverage sweep uses a shared embedding vector and applies a `min_score=0.25` gate to skip quarters with no relevant content.
+
+### Self-Reflection Feedback Loop (`src/agent/nodes.py:self_reflect`)
+
+`self_reflect` builds two complementary retry plans:
+
+1. **Gap-driven** (LLM `gaps` field) — generates topic-specific retry queries; routes to Tavily when the gap mentions news / market / external context, otherwise Qdrant.
+2. **Coverage-driven** (`coverage_matrix`) — flags quarters where `chunk_count<2` OR `max_score<0.4` OR `quote_verified=False` as "weak quarters" and emits up to 3 quarter-targeted retry queries with a `target_quarter` field. `parallel_retrieval` honors `target_quarter` by overriding `quarters_filter` for that single retrieval, concentrating retrieval power on the weak quarter.
+
+When the LLM judge gives a low score, both plans run together (gap fill + coverage fill), giving the next iteration material to fix both topic gaps and per-quarter retrieval blind spots. When neither plan produces queries, the original sub_queries are reused unchanged.
+
+### Cost Guard (`src/agent/nodes.py:self_reflect`)
+
+`self_reflect` checks per-query LLM spend against `LLM_BUDGET_USD` (default $0.50). The baseline is captured at `intent_classifier` entry so multi-company parallel runs don't double-count each other's costs. When triggered, `cost_guard_triggered` is written to state — `should_continue` reads this flag and forces `end`, regardless of confidence. `report_generator` displays a notice in the report.
+
+### HyDE Query Expansion (`src/core/retriever.py`)
+
+When `LLM_HYDE_ENABLED=true`, `_maybe_expand()` runs before each `embed_query()` call: an LLM (mode=dev / cheap model) generates a hypothetical earnings-call-style answer in 80–150 Chinese characters, and the retriever embeds the answer instead of the raw query. Improves recall on short queries by aligning the embedding vocabulary with target chunks. LRU-cached by query string (size 128). Adds 1 LLM call per unique query — disabled by default.
 
 ### Contradiction Detection (`src/core/contradiction.py`)
 
@@ -117,6 +134,14 @@ Models (2026-05): OpenAI `gpt-5o` / `gpt-5o-mini`, Gemini `gemini-3.0-flash`, Co
 When a backend hits quota / 429 rate limit / 401-403 auth / 404 model-not-found / 503 unavailable, `chat()` prints a friendly Chinese message (e.g. `⚠️  OpenAI (GPT-5o) 今日 token / 配額已用完，自動切換下一個後端…`) and falls through to the next backend. Network/timeout errors retry once on the same backend before falling through. Non-transient errors raise immediately.
 
 Anthropic and Groq backends were removed (no API key) — `LLM_BACKEND=anthropic` / `groq` is rejected with a warning.
+
+### Rate Limiting (`src/core/rate_limiter.py`)
+
+Two-layer protection in `app.py`:
+1. **Session-based** (existing): `st.session_state["last_run_time"]`, 10s cooldown — bypassable by clearing cookies / opening a new tab.
+2. **IP-based** (P1-9): module-level thread-safe in-memory dict keyed on client IP from `X-Forwarded-For` (preferred) or `X-Real-IP`, with 600s TTL eviction. Survives session resets. Single-pod only — for multi-pod deployments, swap the in-memory backend for Redis.
+
+Both layers are checked before enabling the run button. The longer of the two cooldowns wins.
 
 ### Telemetry (`src/core/telemetry.py`)
 
