@@ -19,6 +19,8 @@ qdrant_storage/
 # ══ 快取 / 測試輸出 ══
 cache/demo_cache.json
 tests/benchmark_results*.json
+tests/benchmark_report*.json
+tests/benchmark_smoke*.json
 
 # ══ IDE / 作業系統 ══
 .vscode/

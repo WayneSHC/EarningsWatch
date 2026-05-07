@@ -245,17 +245,36 @@ HALLUCINATION_TESTS = [
 ]
 
 
-def run_contradiction_tests(tests: list[dict]) -> dict:
-    """執行矛盾偵測測試，回傳統計結果。"""
+def run_contradiction_tests(tests: list[dict], with_ragas: bool = False,
+                             ragas_sample: int | None = None) -> dict:
+    """執行矛盾偵測測試，回傳統計結果。
+
+    Args:
+        tests:        題庫
+        with_ragas:   True 時對每題額外跑 RAGAS（faithfulness/relevancy/precision）
+        ragas_sample: 限制只對前 N 題跑 RAGAS（控制 API 成本），None = 全部
+    """
     from src.agent.graph import run_agent
+    from src.core import telemetry
+
+    ragas_active = False
+    if with_ragas:
+        from src.core import ragas_eval
+        ragas_active = ragas_eval.is_available()
+        if not ragas_active:
+            print("⚠ RAGAS 未安裝（pip install -r requirements-dev.txt），跳過 RAGAS 評估")
 
     correct = 0
     total = len(tests)
     results = []
+    ragas_scores: list[dict[str, float]] = []
+    total_cost = 0.0
+    total_tokens = 0
 
-    for t in tests:
+    for idx, t in enumerate(tests):
         print(f"\n[{t['id']}] {t['description']}")
         try:
+            telemetry.reset()  # 每題獨立記錄成本，避免累加
             start = time.time()
             state = run_agent(
                 query=f"{t['company']} 在「{t['topic']}」方面各季發言是否有矛盾？",
@@ -264,6 +283,11 @@ def run_contradiction_tests(tests: list[dict]) -> dict:
                 quarters=t.get("quarters", []),
             )
             elapsed = time.time() - start
+            tm_summary = telemetry.summary()
+            q_cost = tm_summary["estimated_cost_usd"]
+            q_tokens = tm_summary["total_tokens"]
+            total_cost += q_cost
+            total_tokens += q_tokens
 
             contradictions = state.get("contradictions", [])
             detected = any(
@@ -275,25 +299,60 @@ def run_contradiction_tests(tests: list[dict]) -> dict:
 
             if is_correct:
                 correct += 1
-                print(f"  ✅ 正確（{elapsed:.1f}s）")
+                print(f"  ✅ 正確（{elapsed:.1f}s, {q_tokens:,} tok, ${q_cost:.4f}）")
             else:
                 print(f"  ❌ 錯誤（期望 {expected}，實際 {detected}）")
 
-            results.append({
+            row = {
                 "id": t["id"],
                 "correct": is_correct,
                 "expected": expected,
                 "detected": detected,
                 "elapsed": elapsed,
                 "confidence": state.get("confidence", 0),
-            })
+                "tokens": q_tokens,
+                "cost_usd": round(q_cost, 6),
+            }
+
+            # ── RAGAS 評估（可選） ────────────────────────────────────────
+            if ragas_active and (ragas_sample is None or idx < ragas_sample):
+                from src.core import ragas_eval
+                ctxs = ragas_eval.state_to_contexts(state)
+                report = state.get("final_report", "")
+                if ctxs and report:
+                    scores = ragas_eval.evaluate_query(
+                        question=f"{t['company']} {t['topic']} 在 {t.get('quarters', [])} 是否有矛盾？",
+                        answer=report,
+                        contexts=ctxs,
+                        ground_truth=t["description"],
+                    )
+                    if scores:
+                        row["ragas"] = scores
+                        ragas_scores.append(scores)
+                        print(f"     📐 RAGAS: " + ", ".join(
+                            f"{k}={v:.2f}" for k, v in scores.items()
+                        ))
+
+            results.append(row)
 
         except Exception as e:
             print(f"  💥 執行失敗: {e}")
             results.append({"id": t["id"], "correct": False, "error": str(e)})
 
     accuracy = correct / total if total > 0 else 0
-    return {"accuracy": accuracy, "correct": correct, "total": total, "results": results}
+    out = {
+        "accuracy": accuracy,
+        "correct": correct,
+        "total": total,
+        "results": results,
+        "total_tokens": total_tokens,
+        "total_cost_usd": round(total_cost, 6),
+        "avg_cost_per_query_usd": round(total_cost / total, 6) if total else 0.0,
+    }
+    if ragas_scores:
+        from src.core import ragas_eval
+        out["ragas_aggregate"] = ragas_eval.aggregate(ragas_scores)
+    return out
 
 
 def run_hallucination_tests(tests: list[dict]) -> dict:
@@ -489,6 +548,19 @@ def main():
         default="tests/benchmark_report.json",
         help="JSON 報告輸出路徑（預設 tests/benchmark_report.json）",
     )
+    parser.add_argument(
+        "--ragas",
+        action="store_true",
+        help="對矛盾偵測測試額外跑 RAGAS 評估"
+             "（faithfulness/answer_relevancy/context_precision）。"
+             "需 pip install -r requirements-dev.txt 並設定 OPENAI_API_KEY。",
+    )
+    parser.add_argument(
+        "--ragas-sample",
+        type=int,
+        default=None,
+        help="只對前 N 題跑 RAGAS（控制 API 成本，預設全部）",
+    )
     args = parser.parse_args()
 
     start_time = datetime.now()
@@ -506,13 +578,25 @@ def main():
     # ── A. 矛盾偵測 ──────────────────────────────────────────────────────────
     if args.type in ("contradiction", "all"):
         _print_separator("A. 矛盾偵測正確率測試（20 題）")
-        r = run_contradiction_tests(CONTRADICTION_TESTS)
+        r = run_contradiction_tests(
+            CONTRADICTION_TESTS,
+            with_ragas=args.ragas,
+            ragas_sample=args.ragas_sample,
+        )
         report["results"]["contradiction"] = r
         print(f"\n📊 結果：{r['correct']}/{r['total']} 正確，準確率 {r['accuracy']:.0%}")
         print(f"   {_pass_fail(r['accuracy'] >= 0.8, '≥ 80%')}")
+        print(f"   💰 成本：{r['total_tokens']:,} tokens, ${r['total_cost_usd']:.4f}"
+              f"（平均 ${r['avg_cost_per_query_usd']:.4f}/題）")
+        if "ragas_aggregate" in r:
+            print(f"   📐 RAGAS 平均：" + ", ".join(
+                f"{k}={v:.2f}" for k, v in r["ragas_aggregate"].items()
+            ))
         report["summary"]["contradiction"] = {
             "accuracy": r["accuracy"],
             "pass": r["accuracy"] >= 0.8,
+            "total_cost_usd": r["total_cost_usd"],
+            "ragas_aggregate": r.get("ragas_aggregate"),
         }
 
     # ── B. 幻覺偵測 ──────────────────────────────────────────────────────────

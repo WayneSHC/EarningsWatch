@@ -184,16 +184,51 @@ with st.sidebar:
     except Exception:
         pass
 
+    # ── Token / Cost telemetry（本次 session 累計）─────────────────────────
+    # 只在已有資料時顯示，避免空白佔版面
+    try:
+        from src.core import telemetry as _tm
+        _summary = _tm.summary()
+        if _summary["total_calls"] > 0:
+            st.divider()
+            st.caption("📊 **本次 Session LLM 用量**")
+            cols = st.columns(2)
+            cols[0].metric("呼叫次數", _summary["total_calls"])
+            cols[1].metric(
+                "預估成本",
+                f"${_summary['estimated_cost_usd']:.4f}",
+                help="依 OpenAI / Gemini / Cohere 公開定價估算（非實際帳單）"
+            )
+            st.caption(
+                f"Tokens：{_summary['total_tokens']:,}  "
+                f"（input {_summary['prompt_tokens']:,} / output {_summary['completion_tokens']:,}）"
+            )
+            if st.button("🔄 重置統計", key="_reset_telemetry"):
+                _tm.reset()
+                st.rerun()
+    except Exception:
+        pass
+
 # ── 主區域 ───────────────────────────────────────────────────────────────────
 st.title("🕵️ EarningsWatch")
 st.markdown("**法說會 Agentic RAG 一致性審計平台** — 追蹤管理層跨季發言，找矛盾・追承諾・抓話術")
 st.divider()
 
-# ── [f] Rate Limiting：防止快速連點濫用 API ──────────────────────────────────
+# ── [f] Rate Limiting：雙層防護 ──────────────────────────────────────────────
+# Layer 1：session-based（清 cookie / 開新 tab 即可繞過）
+# Layer 2：[P1-9] IP-based（跨 session 跨 tab，配合 X-Forwarded-For）
+# 只要任一層在冷卻中，按鈕就會 disabled
+from src.core import rate_limiter as _rl
+
 _COOLDOWN_SEC = 10   # 兩次查詢間最短間隔（秒）
 now = time.time()
 last_run = st.session_state.get("last_run_time", 0.0)
-cooldown_remaining = max(0.0, _COOLDOWN_SEC - (now - last_run))
+session_cooldown = max(0.0, _COOLDOWN_SEC - (now - last_run))
+
+_client_ip = _rl.get_client_ip()
+ip_cooldown = _rl.check(_client_ip) if _client_ip else 0.0
+
+cooldown_remaining = max(session_cooldown, ip_cooldown)
 
 _not_enough_companies = compare_mode and len(selected_companies) < 2
 
@@ -214,6 +249,9 @@ with col_info:
 # ══════════════════════════════════════════════════════════════════════════════
 if run_btn:
     st.session_state["last_run_time"] = time.time()
+    # [P1-9] 同步記錄到 IP 限流器（無 IP 時為 no-op）
+    if _client_ip:
+        _rl.record(_client_ip)
 
     # ── [f] 輸入驗證：防止超長輸入、HTML/Script 注入、非法參數 ──────────────
     _MAX_QUERY_LEN = 500   # 超過此長度截斷，避免 token 爆炸與 prompt injection

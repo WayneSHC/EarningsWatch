@@ -27,17 +27,44 @@ _FUZZY_SOURCE_CAP = 2000  # [c] 模糊比對時來源文本上限；batch_detect
 # [b] 法律免責聲明 boilerplate 特徵詞（出現任一即視為無主題內容）
 # coverage sweep 以 min_score=0.25 補充缺漏季度時，disclaimer 因出現在每頁
 # 而輕易達到門檻，若不過濾會讓矛盾偵測比較無意義的制式文字。
+#
+# 中文簽名來自台股法說會逐字稿常見句型（台積電、聯發科、鴻海等）；
+# 比對前會先 lower() 並移除全形空白，因此英文不分大小寫、中文不受空白影響。
 _BOILERPLATE_SIGNATURES = (
+    # 英文（TSMC/Apple/Nvidia 美式財報常見）
     "forward-looking statements subject to significant risks",
     "actual results may differ materially",
     "statements of its current expectations are forward-looking",
+    "safe harbor",
+    "private securities litigation reform act",
+    # 中文（台股法說會逐字稿常見）
+    "前瞻性陳述",
+    "前瞻性敘述",
+    "前瞻性說明",
+    "實際結果可能有所不同",
+    "實際結果與預期",
+    "實際結果可能與",
+    "風險與不確定性",
+    "風險及不確定性",
+    "本公司不負更新",
+    "本公司無義務更新",
+    "僅供參考",
+    "不構成投資建議",
+    "本資料所載",
 )
+# [c] 預先計算「移除所有空白後」的簽名，避免每次比對時重複處理
+_BOILERPLATE_NORMALIZED = tuple("".join(s.split()) for s in _BOILERPLATE_SIGNATURES)
 
 
 def _is_boilerplate(text: str) -> bool:
-    """偵測是否為法律免責聲明 boilerplate（大小寫不敏感）。"""
-    lower = text.lower()
-    return any(sig in lower for sig in _BOILERPLATE_SIGNATURES)
+    """偵測是否為法律免責聲明 boilerplate（大小寫不敏感、忽略空白與排版差異）。
+
+    str.split() 預設會切所有 Unicode 空白（含全形 \\u3000、tab、換行），
+    join 後得到一個「無空白」字串；簽名也以相同方式預先處理過，
+    因此排版差異（換行、全形空白、字元間插入空白）都不會阻擋比對。
+    """
+    normalized = "".join(text.lower().split())
+    return any(sig in normalized for sig in _BOILERPLATE_NORMALIZED)
 
 
 def _unwrap(e: BaseException) -> BaseException:

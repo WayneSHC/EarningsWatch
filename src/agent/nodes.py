@@ -21,6 +21,13 @@ from src.agent.tools import decide_tools, search_news, get_stock_price
 from src.core.retriever import retrieve, get_company_quarters, retrieve_coverage
 from src.core.contradiction import batch_detect, detect_promises, _extract_json
 from src.core.llm_client import chat as llm_chat
+from src.core import telemetry
+
+
+# [c] 單次 query 的 LLM 預算上限（USD）；超過則強制結束 retry 迴圈。
+# 預設 0.50 美元 ≈ 一般查詢上限的 5~10 倍，保留 self-reflection 重查空間，
+# 避免 LLM 反覆呼叫導致帳單失控。
+_LLM_BUDGET_USD = float(os.getenv("LLM_BUDGET_USD", "0.50"))
 
 
 def _llm(prompt: str, max_tokens: int = 500) -> str:
@@ -61,7 +68,16 @@ def intent_classifier(state: AgentState) -> dict:
             company = company or "台積電"
 
     log.append(f"  → 公司：{company}｜主題：{topic}｜季度：{quarters or '全部'}")
-    return {"company": company, "topic": topic, "quarters": quarters, "steps_log": log}
+    # [P1-6] 快照進入時的累計 cost_usd 作為基線；should_continue 用此計算
+    # 本次 query 的實際支出（避免 sibling query 干擾）
+    cost_baseline = telemetry.summary().get("estimated_cost_usd", 0.0)
+    return {
+        "company": company,
+        "topic": topic,
+        "quarters": quarters,
+        "cost_baseline_usd": cost_baseline,
+        "steps_log": log,
+    }
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -213,6 +229,7 @@ def parallel_retrieval(state: AgentState) -> dict:
     # [R4] 自適應 top_k：依問題範圍調整每條 sub_query 取回的 chunk 數
     #   - 跨季比對需要更多 chunks 餵給 Contradiction Detector
     #   - 重試輪（iteration > 0）擴大搜尋範圍，提高補強成功率
+    #   - coverage_fill 類查詢專攻單一弱季，給更多 candidate
     #   - 上限 12 防止單次檢索 payload 過大
     def _adaptive_top_k(sq: dict) -> int:
         base = 5
@@ -223,6 +240,9 @@ def parallel_retrieval(state: AgentState) -> dict:
         # guidance 類查詢通常 chunk 集中，3~4 已足夠
         if sq.get("section_filter") == "guidance":
             base = 4
+        # [A5+] coverage_fill：單一弱季專屬查詢，多取 candidate 提高補強成功率
+        if sq.get("tool_hint") == "coverage_fill":
+            base = 8
         # 重試時擴大搜尋（給 reflect-driven gap 查詢更多候選）
         if iteration > 0:
             base = min(12, base + 2)
@@ -233,7 +253,10 @@ def parallel_retrieval(state: AgentState) -> dict:
         """單一 qdrant sub_query 的檢索，供 ThreadPoolExecutor 呼叫。"""
         # [f] 使用者選定季度時，所有子查詢（含 cross_quarter）都必須遵守；
         # 只有使用者未指定季度（quarters_filter=None）時，cross_quarter 才查全部季度。
-        sq_quarters = quarters_filter
+        # [A5+] target_quarter 是 self_reflect 標記的弱季專屬查詢；
+        #     蓋過 quarters_filter，把火力集中到該季提高補強成功率。
+        target_q = sq.get("target_quarter")
+        sq_quarters = [target_q] if target_q else quarters_filter
         return retrieve(
             query=sq["query"],
             company=company,
@@ -531,29 +554,63 @@ gaps 應指出「retrieve 還沒抓到但對回答有幫助」的主題（如：
     if gaps:
         log.append(f"  📌 缺漏主題：{gaps}")
 
-    # [A3] 用 gaps 構造新 sub_queries（取代盲目加「詳細說明」）
+    # [A3] 用 gaps + coverage_matrix 構造新 sub_queries
     new_sub_queries = state.get("sub_queries", [])
     do_retry = (score < 0.75 or should_retry_llm) and iteration < 3
     if do_retry:
         log.append(f"  🔄 觸發重查（第 {iteration + 1} 次）")
-        if gaps:
-            # [A3+] tool_hint：依 gap 語意判斷工具；
-            # 含「新聞/市場/最新/外部/競爭/產業」關鍵字 → tavily；其餘 → qdrant
-            _NEWS_KWS = ("新聞", "市場", "最新", "外部", "競爭", "產業")
-            new_sub_queries = []
-            for i, gap in enumerate(gaps):
-                tool = "tavily" if any(kw in gap for kw in _NEWS_KWS) else "qdrant"
-                new_sub_queries.append({
-                    "id": f"gap_{i}",
-                    "query": f"{company} {gap}",
-                    "purpose": f"補強：{gap[:20]}",
-                    "tool": tool,
-                    "tool_hint": "gap_fill",  # 標記此為 gap-filling 查詢，供 retrieval 日誌用
-                })
-            log.append(f"  → 依 gaps 重建 {len(new_sub_queries)} 條 sub_queries")
+
+        # [A3+] (1) gap-driven：依 LLM 指出的缺漏主題產生通用查詢
+        # tool_hint：含「新聞/市場/最新/外部/競爭/產業」→ tavily；其餘 → qdrant
+        _NEWS_KWS = ("新聞", "市場", "最新", "外部", "競爭", "產業")
+        rebuilt: list[dict] = []
+        for i, gap in enumerate(gaps):
+            tool = "tavily" if any(kw in gap for kw in _NEWS_KWS) else "qdrant"
+            rebuilt.append({
+                "id": f"gap_{i}",
+                "query": f"{company} {gap}",
+                "purpose": f"補強：{gap[:20]}",
+                "tool": tool,
+                "tool_hint": "gap_fill",
+            })
+
+        # [A5+] (2) coverage-driven：用 coverage_matrix 找出資料品質弱的季度，
+        #     對每個弱季產生季度限定的重查（target_quarter）。
+        #     弱季定義：chunk_count<2 或 max_score<0.4 或 引文驗證失敗。
+        #     原因：LLM 的 gaps 偏向「主題」缺漏，但實際常見問題是「特定季度」
+        #     檢索分數過低；季度導向重查能直接補強這類 case，與 gap fill 互補。
+        weak_quarters: list[str] = []
+        for q_key, info in sorted(coverage_matrix.items()):
+            if (
+                info["chunk_count"] < 2
+                or info["max_score"] < 0.4
+                or not info["quote_verified"]
+            ):
+                weak_quarters.append(q_key)
+
+        # 上限 3 個避免重查 sub_queries 過多
+        for i, wq in enumerate(weak_quarters[:3]):
+            rebuilt.append({
+                "id": f"weak_{wq}_{i}",
+                # 用更廣的查詢字串覆蓋該季（提高 recall）
+                "query": f"{company} {wq} {topic} 發言重點",
+                "purpose": f"補強弱季 {wq}",
+                "tool": "qdrant",
+                "tool_hint": "coverage_fill",
+                "target_quarter": wq,  # parallel_retrieval 會用此覆蓋 quarters_filter
+            })
+        if weak_quarters[:3]:
+            log.append(f"  → coverage 發現弱季：{weak_quarters[:3]}")
+
+        if rebuilt:
+            new_sub_queries = rebuilt
+            log.append(
+                f"  → 重建 {len(rebuilt)} 條 sub_queries"
+                f"（gap={len(gaps)}, weak={min(len(weak_quarters), 3)}）"
+            )
         else:
-            # 無 gaps（LLM 失敗）時，保留原 sub_queries（不再加「詳細說明」雜訊）
-            log.append("  → 無 gaps，沿用原 sub_queries 重試")
+            # 無 gaps 且無弱季 → 沿用原 sub_queries（避免引入雜訊）
+            log.append("  → 無 gaps 且無弱季，沿用原 sub_queries 重試")
 
     # [A6] 棄權路徑：重試次數用盡且信心度仍嚴重不足（< 0.4）。
     # 避免 report_generator 用極少資料生成不可靠報告，對使用者造成誤導。
@@ -566,6 +623,19 @@ gaps 應指出「retrieve 還沒抓到但對回答有幫助」的主題（如：
             "進入棄權模式，不生成可能誤導的報告"
         )
 
+    # [P1-6] Cost Guard：本次 query 累計支出 ≥ 預算就強制結束 retry。
+    # 計算用 (current - baseline) 隔離出本次 query 的實際支出，
+    # 避免 multi-company 並行時誤算到 sibling query 的成本。
+    cost_guard = False
+    baseline = state.get("cost_baseline_usd", 0.0)
+    spent = telemetry.summary().get("estimated_cost_usd", 0.0) - baseline
+    if do_retry and spent >= _LLM_BUDGET_USD:
+        cost_guard = True
+        log.append(
+            f"  💸 cost guard：本次已花費 ${spent:.4f} ≥ 預算 ${_LLM_BUDGET_USD:.2f}，"
+            "停止 retry，以現有資料生成報告"
+        )
+
     return {
         "confidence": score,
         "reflection_issues": issues,
@@ -574,6 +644,7 @@ gaps 應指出「retrieve 還沒抓到但對回答有幫助」的主題（如：
         "sub_queries": new_sub_queries,
         "coverage_matrix": coverage_matrix,
         "abstain": abstain,
+        "cost_guard_triggered": cost_guard,
         "steps_log": log,
     }
 
@@ -637,6 +708,14 @@ def report_generator(state: AgentState) -> dict:
         f"**公司**：{company}　**主題**：{topic}　**分析信心度**：{confidence:.0%}",
         "",
     ]
+
+    # [P1-6] cost guard 觸發時加上提示，讓使用者知道報告非完整收斂結果
+    if state.get("cost_guard_triggered"):
+        sections.append(
+            "> 💸 **預算保護觸發**：本次查詢的 LLM 成本已達上限，"
+            "Self-Reflection 提早結束 retry，報告基於目前可用資料生成。"
+        )
+        sections.append("")
 
     # ── 直接回答使用者問題 ──────────────────────────────────────────────
     # 彙整所有有主題相關內容的季度 chunks，送 LLM 合成一段直接回答。
@@ -771,13 +850,17 @@ def report_generator(state: AgentState) -> dict:
 # ══════════════════════════════════════════════════════════════════════════════
 def should_continue(state: AgentState) -> str:
     """
-    LangGraph 條件邊函數。
-    信心度 < 0.75 且迭代次數 < 3 → retry（跳回 retrieve）
-    否則 → end（進入 report）
+    LangGraph 條件邊函數（純函數，不 mutate state）。
+
+    Retry 條件（必須同時滿足）：
+      1. 信心度 < 0.75
+      2. 迭代次數 < 3
+      3. cost_guard_triggered = False（self_reflect 已負責設定此旗標）
     """
     confidence = state.get("confidence", 1.0)
     iteration = state.get("iteration", 0)
-
+    if state.get("cost_guard_triggered"):
+        return "end"
     if confidence < 0.75 and iteration < 3:
         return "retry"
     return "end"

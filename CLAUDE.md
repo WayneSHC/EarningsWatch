@@ -34,7 +34,26 @@ docker start qdrant 2>/dev/null || docker run -d --name qdrant \
   -p 6333:6333 -v $(pwd)/qdrant_storage:/qdrant/storage qdrant/qdrant
 ```
 
-There are no automated tests (`tests/` is empty). Manual verification is done by running the Streamlit app.
+Tests live in `tests/`:
+
+```bash
+# Run unit tests (offline; no API keys needed)
+pytest tests/ -v
+
+# Run end-to-end benchmark (30 questions, requires LLM API + Qdrant)
+python tests/benchmark.py
+
+# Benchmark with RAGAS metrics (faithfulness / relevancy / precision)
+pip install -r requirements-dev.txt
+python tests/benchmark.py --ragas --ragas-sample 5  # smoke test on 5 queries
+python tests/benchmark.py --ragas                   # full RAGAS run (~$1 USD)
+```
+
+- `tests/test_contradiction.py` — boilerplate filtering (English + Chinese), evidence verifier (exact + fuzzy), `batch_detect` quarter-pair logic
+- `tests/test_llm_client.py` — backend fallback, quota / 429 / 401 / 404 / 503 detection, friendly error messages
+- `tests/test_telemetry.py` — token / cost / latency registry, thread-safe accumulation, llm_client integration
+- `tests/test_ragas_eval.py` — RAGAS wrapper graceful-degradation paths
+- `tests/benchmark.py` — end-to-end agent assertions: contradiction accuracy ≥ 80%, hallucination ≤ 5%, citation ≥ 90%, self-reflection trigger ≥ 30%, promise tracking ≥ 75%; `--ragas` adds faithfulness / answer_relevancy / context_precision (LLM-as-judge via GPT-4o)
 
 ## Architecture
 
@@ -69,11 +88,28 @@ Seven nodes in `graph.py`, implemented in `nodes.py`, typed via `state.py`:
 | `reflect` | `self_reflect` | Scores confidence; loops back to `retrieve` (max 3 iterations) |
 | `report` | `report_generator` | Produces final Markdown report |
 
-The conditional edge `reflect → retrieve` (retry) or `reflect → report` (end) is the self-reflection loop.
+The conditional edge `reflect → retrieve` (retry) or `reflect → report` (end) is the self-reflection loop. `should_continue` ends the loop when (a) confidence ≥ 0.75, (b) iteration ≥ 3, or (c) `cost_guard_triggered` is set.
 
 ### Coverage Sweep (`src/core/retriever.py`)
 
 After the initial top-k retrieval, `parallel_retrieval` calls `get_company_quarters()` (Qdrant facet API) then `retrieve_coverage()` for any quarters missing from the result set. Coverage sweep uses a shared embedding vector and applies a `min_score=0.25` gate to skip quarters with no relevant content.
+
+### Self-Reflection Feedback Loop (`src/agent/nodes.py:self_reflect`)
+
+`self_reflect` builds two complementary retry plans:
+
+1. **Gap-driven** (LLM `gaps` field) — generates topic-specific retry queries; routes to Tavily when the gap mentions news / market / external context, otherwise Qdrant.
+2. **Coverage-driven** (`coverage_matrix`) — flags quarters where `chunk_count<2` OR `max_score<0.4` OR `quote_verified=False` as "weak quarters" and emits up to 3 quarter-targeted retry queries with a `target_quarter` field. `parallel_retrieval` honors `target_quarter` by overriding `quarters_filter` for that single retrieval, concentrating retrieval power on the weak quarter.
+
+When the LLM judge gives a low score, both plans run together (gap fill + coverage fill), giving the next iteration material to fix both topic gaps and per-quarter retrieval blind spots. When neither plan produces queries, the original sub_queries are reused unchanged.
+
+### Cost Guard (`src/agent/nodes.py:self_reflect`)
+
+`self_reflect` checks per-query LLM spend against `LLM_BUDGET_USD` (default $0.50). The baseline is captured at `intent_classifier` entry so multi-company parallel runs don't double-count each other's costs. When triggered, `cost_guard_triggered` is written to state — `should_continue` reads this flag and forces `end`, regardless of confidence. `report_generator` displays a notice in the report.
+
+### HyDE Query Expansion (`src/core/retriever.py`)
+
+When `LLM_HYDE_ENABLED=true`, `_maybe_expand()` runs before each `embed_query()` call: an LLM (mode=dev / cheap model) generates a hypothetical earnings-call-style answer in 80–150 Chinese characters, and the retriever embeds the answer instead of the raw query. Improves recall on short queries by aligning the embedding vocabulary with target chunks. LRU-cached by query string (size 128). Adds 1 LLM call per unique query — disabled by default.
 
 ### Contradiction Detection (`src/core/contradiction.py`)
 
@@ -98,6 +134,29 @@ Models (2026-05): OpenAI `gpt-5o` / `gpt-5o-mini`, Gemini `gemini-3.0-flash`, Co
 When a backend hits quota / 429 rate limit / 401-403 auth / 404 model-not-found / 503 unavailable, `chat()` prints a friendly Chinese message (e.g. `⚠️  OpenAI (GPT-5o) 今日 token / 配額已用完，自動切換下一個後端…`) and falls through to the next backend. Network/timeout errors retry once on the same backend before falling through. Non-transient errors raise immediately.
 
 Anthropic and Groq backends were removed (no API key) — `LLM_BACKEND=anthropic` / `groq` is rejected with a warning.
+
+### Rate Limiting (`src/core/rate_limiter.py`)
+
+Two-layer protection in `app.py`:
+1. **Session-based** (existing): `st.session_state["last_run_time"]`, 10s cooldown — bypassable by clearing cookies / opening a new tab.
+2. **IP-based** (P1-9): module-level thread-safe in-memory dict keyed on client IP from `X-Forwarded-For` (preferred) or `X-Real-IP`, with 600s TTL eviction. Survives session resets. Single-pod only — for multi-pod deployments, swap the in-memory backend for Redis.
+
+Both layers are checked before enabling the run button. The longer of the two cooldowns wins.
+
+### Telemetry (`src/core/telemetry.py`)
+
+Every `chat()` call records prompt/completion tokens, duration, and an estimated USD cost (via the hardcoded 2026-05 pricing table in `_PRICING`) into a thread-safe singleton registry. Both successful and failed calls are recorded. The Streamlit sidebar polls `telemetry.summary()` and shows session totals; `benchmark.py` calls `telemetry.reset()` between questions to compute per-query token cost. The pricing table is intentionally static — when prices change, edit `_PRICING` directly.
+
+### RAGAS Evaluation (`src/core/ragas_eval.py`)
+
+Optional dependency. When `ragas` and `langchain-openai` are installed and `OPENAI_API_KEY` is set, `benchmark.py --ragas` runs LLM-as-judge metrics against retrieved contexts:
+
+- `faithfulness` — does the answer cite from retrieved contexts (hallucination inverse)
+- `answer_relevancy` — semantic relevance of answer to query
+- `context_precision` — relevance of retrieved chunks to query
+- `context_recall` — added when `ground_truth` is supplied (uses test description as proxy)
+
+The wrapper degrades gracefully: missing package, missing API key, or empty contexts all return `{}` instead of raising. RAGAS uses its own LLM (GPT-4o by default via `langchain-openai`) — independent of the project's `llm_client` cascade.
 
 ### Qdrant Client (`src/core/qdrant_client.py`)
 

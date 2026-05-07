@@ -6,3 +6,10 @@
 
 pytest>=8.0.0                     # 測試框架
 pytest-cov>=5.0.0                 # 覆蓋率報告（CI 顯示）
+
+# ── RAGAS 評估（benchmark.py --ragas 用）───────────────────────────────────
+# 可選：未安裝時 benchmark 會跳過 RAGAS metric，其他指標照常跑。
+# RAGAS 預設透過 OPENAI_API_KEY 呼叫 GPT-4o 做 LLM-as-judge 評分。
+ragas>=0.2.0                      # RAGAS 評估框架（faithfulness/relevancy/precision）
+langchain-openai>=0.2.0           # RAGAS 預設 LLM driver
+datasets>=2.20.0                  # RAGAS 內部用的 HF datasets 格式

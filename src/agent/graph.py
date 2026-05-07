@@ -129,6 +129,10 @@ def run_agent(
         "iteration": 0,
         "reflection_issues": [],
         "reflection_gaps": [],
+        "coverage_matrix": {},
+        "abstain": False,
+        "cost_baseline_usd": 0.0,
+        "cost_guard_triggered": False,
         "final_report": "",
         "steps_log": [],
     }

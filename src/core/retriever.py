@@ -23,6 +23,45 @@ TOP_K_RETRIEVAL = 20   # 初步檢索（向量 + BM25 各取 K）
 TOP_K_RERANK = 5       # Rerank 後保留筆數
 RRF_K = 60             # [R1] RRF 平滑常數，60 為文獻常用預設值
 
+# ── [R5] HyDE（Hypothetical Document Embeddings）──────────────────────────────
+# 短查詢與目標 chunks 的措辭差距大時，向量相似度容易偏低。HyDE 先用 LLM 生成
+# 一段「假設性回答」（用法說會逐字稿的口吻），再對「答案」做 embedding，
+# 與真實 chunk 的詞彙分布更接近，可顯著提升 recall。
+# 預設 off：每次查詢多 1 次 LLM 呼叫 + token 成本，需評估成本/品質再開啟。
+_HYDE_ENABLED = os.getenv("LLM_HYDE_ENABLED", "false").strip().lower() in ("true", "1", "yes")
+_HYDE_MIN_QUERY_LEN = 6   # 過短的查詢字串不做 HyDE（避免雜訊放大）
+
+
+@lru_cache(maxsize=128)
+def _hyde_expand(query: str) -> str:
+    """
+    [R5] 用 LLM 生成假設性回答，作為 embedding 種子。
+    LRU cache：同一 process 內同 query 只算一次（節省 token）。
+    LLM 失敗時回傳原 query，呼叫端會降級為純 query embedding。
+    """
+    # 延遲 import 避免 retriever.py 載入時就觸發 llm_client 初始化
+    from src.core.llm_client import chat as _llm_chat
+
+    prompt = (
+        "你是台灣半導體分析師。針對以下問題，請用法說會逐字稿的口吻寫一段"
+        "假設性回答（80~150 字繁體中文）。"
+        "盡量使用法說會常見詞彙（如「需求強勁」「庫存調整」「毛利率指引」"
+        "「先進製程」「美國廠成本」）。只回傳回答內文，不要有引言或標題。\n\n"
+        f"問題：{query}"
+    )
+    try:
+        return _llm_chat(prompt, max_tokens=200, mode="dev").strip() or query
+    except Exception as e:
+        print(f"[Retriever] HyDE 生成失敗（{type(e).__name__}），降級為原 query")
+        return query
+
+
+def _maybe_expand(query: str) -> str:
+    """[R5] HyDE 包裝：env 啟用且 query 夠長才呼叫 _hyde_expand。"""
+    if not _HYDE_ENABLED or len(query.strip()) < _HYDE_MIN_QUERY_LEN:
+        return query
+    return _hyde_expand(query)
+
 
 @lru_cache(maxsize=1)
 def _get_cohere_client() -> cohere.Client | None:
@@ -251,7 +290,8 @@ def vector_search(
     相容新版 qdrant-client（>=1.7）使用 query_points；舊版 fallback 到 search。
     """
     client = get_qdrant_client()
-    vector = embed_query(query)
+    # [R5] HyDE 擴展：用假設性回答的 embedding 提升 recall（env-gated）
+    vector = embed_query(_maybe_expand(query))
     qfilter = _build_filter(company, quarters, section)
 
     # qdrant-client >= 1.7 使用 query_points；舊版用 search
@@ -392,7 +432,8 @@ def retrieve_coverage(
         print(f"[Retriever] coverage sweep 超過 {max_quarters} 季，取最新 {max_quarters} 季")
 
     client = get_qdrant_client()
-    vector = embed_query(query)   # 只算一次 embedding，所有季度共用
+    # [R5] HyDE：coverage sweep 也享受 embedding 擴展，所有季度共用
+    vector = embed_query(_maybe_expand(query))   # 只算一次 embedding，所有季度共用
     result: dict[str, list[dict]] = {}
 
     # [R8] over-fetch 倍數：rerank 啟用時抓 3 倍候選，給精排篩選空間

@@ -19,6 +19,8 @@ import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from functools import lru_cache
 
+from src.core import telemetry
+
 # ── [b] 逐呼叫 Timeout 設定 ────────────────────────────────────────────────────
 _DEFAULT_TIMEOUT_SEC = int(os.getenv("LLM_TIMEOUT_SECONDS", "45"))
 
@@ -141,9 +143,9 @@ def _get_cohere_llm_client():
 
 def _call_openai_compat(prompt: str, model: str, max_tokens: int,
                          base_url: str | None = None,
-                         api_key_env: str = "OPENAI_API_KEY") -> str:
+                         api_key_env: str = "OPENAI_API_KEY") -> tuple[str, int, int]:
     """
-    OpenAI SDK 相容介面。
+    OpenAI SDK 相容介面，回傳 (text, prompt_tokens, completion_tokens)。
 
     [b] 參數相容性：較新模型（gpt-5*、o1 系列）改用 `max_completion_tokens`，
         舊模型仍接受 `max_tokens`。先試新參數，失敗再退回舊參數，雙向相容。
@@ -173,10 +175,15 @@ def _call_openai_compat(prompt: str, model: str, max_tokens: int,
             )
         else:
             raise
-    return resp.choices[0].message.content.strip()
+    text = resp.choices[0].message.content.strip()
+    usage = getattr(resp, "usage", None)
+    p_tok = int(getattr(usage, "prompt_tokens", 0) or 0) if usage else 0
+    c_tok = int(getattr(usage, "completion_tokens", 0) or 0) if usage else 0
+    return text, p_tok, c_tok
 
 
-def _call_gemini(prompt: str, model: str, max_tokens: int) -> str:
+def _call_gemini(prompt: str, model: str, max_tokens: int) -> tuple[str, int, int]:
+    """Gemini 呼叫，回傳 (text, prompt_tokens, completion_tokens)。"""
     from google.genai import types
     client = _get_gemini_client()
     cfg_kwargs: dict = {"max_output_tokens": max_tokens}
@@ -189,19 +196,41 @@ def _call_gemini(prompt: str, model: str, max_tokens: int) -> str:
         contents=prompt,
         config=types.GenerateContentConfig(**cfg_kwargs),
     )
-    return (resp.text or "").strip()
+    text = (resp.text or "").strip()
+    meta = getattr(resp, "usage_metadata", None)
+    p_tok = int(getattr(meta, "prompt_token_count", 0) or 0) if meta else 0
+    c_tok = int(getattr(meta, "candidates_token_count", 0) or 0) if meta else 0
+    return text, p_tok, c_tok
 
 
-def _call_cohere(prompt: str, model: str, max_tokens: int) -> str:
+def _call_cohere(prompt: str, model: str, max_tokens: int) -> tuple[str, int, int]:
+    """Cohere 呼叫，回傳 (text, prompt_tokens, completion_tokens)。"""
     client = _get_cohere_llm_client()
     resp = client.chat(model=model, message=prompt, max_tokens=max_tokens)
-    return resp.text.strip()
+    text = resp.text.strip()
+    # Cohere v1 回傳 meta.tokens.{input_tokens, output_tokens}；舊版可能用 billed_units
+    p_tok = c_tok = 0
+    meta = getattr(resp, "meta", None)
+    if meta is not None:
+        tokens_obj = getattr(meta, "tokens", None) or getattr(meta, "billed_units", None)
+        if tokens_obj is not None:
+            p_tok = int(
+                getattr(tokens_obj, "input_tokens", 0)
+                or getattr(tokens_obj, "input", 0)
+                or 0
+            )
+            c_tok = int(
+                getattr(tokens_obj, "output_tokens", 0)
+                or getattr(tokens_obj, "output", 0)
+                or 0
+            )
+    return text, p_tok, c_tok
 
 
 # ── 統一呼叫入口 ──────────────────────────────────────────────────────────────
 
-def _dispatch(backend: str, prompt: str, model: str, max_tokens: int) -> str:
-    """單一後端呼叫，未知後端 raise。"""
+def _dispatch(backend: str, prompt: str, model: str, max_tokens: int) -> tuple[str, int, int]:
+    """單一後端呼叫，回傳 (text, prompt_tokens, completion_tokens)；未知後端 raise。"""
     if backend == "openai":
         return _call_openai_compat(prompt, model, max_tokens)
     if backend == "gemini":
@@ -214,7 +243,7 @@ def _dispatch(backend: str, prompt: str, model: str, max_tokens: int) -> str:
 def _dispatch_with_timeout(
     backend: str, prompt: str, model: str, max_tokens: int,
     timeout_sec: int = _DEFAULT_TIMEOUT_SEC,
-) -> str:
+) -> tuple[str, int, int]:
     """[b][c] 在全域 ThreadPoolExecutor 中執行 _dispatch，強制施加 timeout。"""
     fut = _LLM_TIMEOUT_POOL.submit(_dispatch, backend, prompt, model, max_tokens)
     try:
@@ -312,14 +341,37 @@ def chat(prompt: str, max_tokens: int = 600, mode: str = "demo") -> str:
                 )
                 time.sleep(delay)
 
+            t0 = time.perf_counter()
             try:
-                return _dispatch_with_timeout(
+                text, p_tok, c_tok = _dispatch_with_timeout(
                     backend, guarded_prompt, model, max_tokens, timeout_sec
                 )
+                # [c] 成功路徑：記錄 token / cost / latency
+                duration_ms = (time.perf_counter() - t0) * 1000
+                telemetry.record(
+                    telemetry.LLMCall(
+                        backend=backend,
+                        model=model,
+                        prompt_tokens=p_tok,
+                        completion_tokens=c_tok,
+                        duration_ms=duration_ms,
+                        cost_usd=telemetry.estimate_cost(backend, model, p_tok, c_tok),
+                    )
+                )
+                return text
 
             except Exception as e:
                 last_err = e
                 msg = str(e)
+                # 失敗也記錄一筆（tokens=0），方便 debug 後端切換頻率
+                telemetry.record(
+                    telemetry.LLMCall(
+                        backend=backend,
+                        model=model,
+                        duration_ms=(time.perf_counter() - t0) * 1000,
+                        error=type(e).__name__,
+                    )
+                )
 
                 # quota / 認證 / 模型名稱錯誤 → 立刻換後端，不重試
                 if any(m.lower() in msg.lower() for m in _QUOTA_MARKERS):
