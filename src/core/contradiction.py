@@ -8,6 +8,7 @@ Contradiction Detector — 整個系統最關鍵的模組。
   - 回傳結構化 JSON，confidence 分數支援 Self-Reflection 評估
 """
 
+import difflib
 import os
 import json
 import re
@@ -16,6 +17,27 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from tenacity import retry, stop_after_attempt, wait_exponential, RetryError
 
 from src.core.llm_client import chat as llm_chat
+
+# [f] Evidence Verifier 參數
+_MIN_QUOTE_LEN = 10       # 少於此長度不做驗證（太短的字串易誤判）
+_FUZZY_THRESHOLD = 0.85   # SequenceMatcher ratio 門檻（0.85 = 允許 ~15% 字元差異）
+_FUZZY_SOURCE_CAP = 2000  # [c] 模糊比對時來源文本上限；batch_detect 已截斷至此，
+                           #     此處重申作為 belt-and-suspenders，避免直接呼叫時無上限
+
+# [b] 法律免責聲明 boilerplate 特徵詞（出現任一即視為無主題內容）
+# coverage sweep 以 min_score=0.25 補充缺漏季度時，disclaimer 因出現在每頁
+# 而輕易達到門檻，若不過濾會讓矛盾偵測比較無意義的制式文字。
+_BOILERPLATE_SIGNATURES = (
+    "forward-looking statements subject to significant risks",
+    "actual results may differ materially",
+    "statements of its current expectations are forward-looking",
+)
+
+
+def _is_boilerplate(text: str) -> bool:
+    """偵測是否為法律免責聲明 boilerplate（大小寫不敏感）。"""
+    lower = text.lower()
+    return any(sig in lower for sig in _BOILERPLATE_SIGNATURES)
 
 
 def _unwrap(e: BaseException) -> BaseException:
@@ -30,29 +52,101 @@ def _unwrap(e: BaseException) -> BaseException:
     return e
 
 
-def _extract_json(text: str) -> dict:
-    """從 LLM 回應中安全萃取 JSON。"""
-    # 嘗試直接 parse
+def _verify_quote(quote: str, source_text: str) -> tuple[bool, bool]:
+    """
+    [f] 驗證 LLM 回傳的引文是否真實存在於來源文字中。
+    防止 LLM 幻覺引文污染跨季矛盾分析結論。
+
+    Returns:
+        (verified, is_fuzzy)
+        - (True, False):  精確子串匹配
+        - (True, True):   模糊滑動視窗匹配（ratio ≥ _FUZZY_THRESHOLD）
+        - (False, False): 無法驗證（可能幻覺）
+
+    設計取捨：
+        - 太短的引文（< _MIN_QUOTE_LEN 字元）視為通過，避免短詞誤判。
+        - 模糊匹配使用滑動視窗：寬度 = quote × 1.4，步幅 = quote // 3；
+          容忍標點替換、縮寫展開等小差異，但抓住完全虛構的引文。
+        - 比對前先摺疊空白（換行 / 全形空格），消除排版差異。
+    """
+    if not quote or not source_text:
+        return False, False
+
+    # 正規化：摺疊所有空白字元（換行、tab、全形空格）
+    q = " ".join(quote.strip().split())
+    s = " ".join(source_text.strip().split())
+
+    if len(q) < _MIN_QUOTE_LEN:
+        return True, False  # 太短不驗證，預設通過
+
+    # 1. 精確子串匹配（最快路徑）
+    if q in s:
+        return True, False
+
+    # 2. 模糊滑動視窗匹配
+    # [c] 截斷來源文本：SequenceMatcher O(n*m) 複雜度，過長的來源會放大迭代次數；
+    #     batch_detect 已做 _MAX_CONTENT=2000 截斷，此處再守一道確保直接呼叫安全。
+    s_capped = s[:_FUZZY_SOURCE_CAP]
+    q_len = len(q)
+    win_size = min(len(s_capped), int(q_len * 1.4) + 10)
+    # [c] 步幅從 q_len // 3 調整為 q_len // 2：減少約 33% 迭代次數；
+    #     代價是邊緣字元精度微降，但在中文財報文字的實測中影響不顯著。
+    step = max(1, q_len // 2)
+    for i in range(0, max(1, len(s_capped) - win_size + 2), step):
+        segment = s_capped[i : i + win_size]
+        if difflib.SequenceMatcher(None, q, segment).ratio() >= _FUZZY_THRESHOLD:
+            return True, True
+
+    return False, False
+
+
+def _extract_json(text: str) -> dict | list:
+    """
+    從 LLM 回應中安全萃取 JSON，支援 dict {} 與 list [] 兩種根結構。
+
+    [b] 三層 fallback：
+      1. 直接 json.loads（最快路徑）
+      2. markdown fence（```json ... ```）萃取，同時匹配 {}/[]
+      3. 首尾掃描：找最早的 { 或 [，配對最後的 } 或 ]
+    全部失敗時回傳預設 dict（confidence=0 讓 self_reflect 偵測到）。
+    """
+    # 1. 直接 parse
     try:
-        return json.loads(text.strip())
+        result = json.loads(text.strip())
+        if isinstance(result, (dict, list)):
+            return result
     except json.JSONDecodeError:
         pass
-    # 嘗試從 ```json ... ``` 區塊萃取
-    match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', text, re.DOTALL)
+
+    # 2. markdown fence（同時支援 {} 與 []）
+    match = re.search(r'```(?:json)?\s*([{\[].*?[}\]])\s*```', text, re.DOTALL)
     if match:
         try:
-            return json.loads(match.group(1))
+            result = json.loads(match.group(1))
+            if isinstance(result, (dict, list)):
+                return result
         except json.JSONDecodeError:
             pass
-    # 掃描第一個 '{' 到最後一個 '}'，支援巢狀結構
-    # [b] r'\{[^{}]*\}' 只能匹配非巢狀 JSON，改用首尾掃描
-    start = text.find('{')
-    end   = text.rfind('}')
-    if start != -1 and end != -1 and end > start:
+
+    # 3. 首尾掃描：{} 或 []，取先出現者
+    # [b] rfind 確保匹配最外層的閉括號，支援巢狀結構
+    b_start, b_end = text.find('{'), text.rfind('}')
+    a_start, a_end = text.find('['), text.rfind(']')
+    candidates: list[tuple[int, int]] = []
+    if b_start != -1 and b_end > b_start:
+        candidates.append((b_start, b_end))
+    if a_start != -1 and a_end > a_start:
+        candidates.append((a_start, a_end))
+    # 取最早出現的候選（避免陣列外包物件，或物件外包陣列時選錯）
+    candidates.sort(key=lambda x: x[0])
+    for start, end in candidates:
         try:
-            return json.loads(text[start:end + 1])
+            result = json.loads(text[start : end + 1])
+            if isinstance(result, (dict, list)):
+                return result
         except json.JSONDecodeError:
-            pass
+            continue
+
     # 全部失敗，記錄警告並回傳預設值（confidence=0 讓 self_reflect 可偵測）
     print(f"[Contradiction] ⚠ JSON 解析失敗，LLM 原始回應（前200字）：{text[:200]!r}")
     return {
@@ -207,6 +301,12 @@ def batch_detect(
             print(f"[Contradiction] ⚠ {q_a} 或 {q_b} 內容為空，跳過比對")
             continue
 
+        # [b] boilerplate 過濾：coverage sweep 可能以低分抓到免責聲明當作主題內容，
+        #     若兩季內容都是制式 disclaimer，比對結果毫無意義，直接跳過。
+        if _is_boilerplate(content_a) and _is_boilerplate(content_b):
+            print(f"[Contradiction] ⚠ {q_a} vs {q_b} 兩季均為法律免責聲明，跳過比對")
+            continue
+
         stmt_a = {
             "quarter": q_a,
             "date":    used_a[0].get("payload", {}).get("date", ""),
@@ -242,6 +342,33 @@ def batch_detect(
                 "follow_up_question": "",
                 "confidence":         0.0,
             }
+
+        # [f] Evidence Verifier：驗證 LLM 引文是否真實存在於來源 chunks。
+        # LLM 可能「合理捏造」一段與原文相似但未出現的句子（hallucination）。
+        # 失敗時：降低 confidence 0.2、清空該引文、標記 verification_failed=True。
+        # 模糊匹配通過時：標記 evidence_{key}_fuzzy=True，報告端可加標注。
+        for ev_key, src_content in (
+            ("evidence_early", stmt_a["content"]),
+            ("evidence_later", stmt_b["content"]),
+        ):
+            quote = analysis.get(ev_key, "")
+            if not quote:
+                continue
+            verified, is_fuzzy = _verify_quote(quote, src_content)
+            if not verified:
+                print(
+                    f"[Contradiction] ⚠ {ev_key} 引文驗證失敗（可能幻覺）"
+                    f"：{quote[:60]!r}"
+                )
+                analysis["confidence"] = round(
+                    max(0.0, analysis.get("confidence", 0.5) - 0.2), 2
+                )
+                analysis[ev_key] = ""
+                analysis["verification_failed"] = True
+            elif is_fuzzy:
+                # 模糊通過：保留引文但標記，讓 UI 可顯示 "~" 提示
+                analysis[f"{ev_key}_fuzzy"] = True
+
         return {
             "quarter_a": q_a,
             "quarter_b": q_b,

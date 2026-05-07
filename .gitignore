@@ -29,3 +29,5 @@ Thumbs.db
 
 # ══ AI 工具設定（本地專用）══
 .claude/
+# Claude Skill 打包檔（本地用，不公開）
+*.skill

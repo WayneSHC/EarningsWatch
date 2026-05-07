@@ -22,9 +22,10 @@ def _stub_env(monkeypatch):
     """Provide dummy keys so module-level code paths don't blow up."""
     monkeypatch.setenv("OPENAI_API_KEY", "test-openai")
     monkeypatch.setenv("GEMINI_API_KEY", "test-gemini")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-anthropic")
-    monkeypatch.delenv("GROQ_API_KEY", raising=False)
     monkeypatch.delenv("COHERE_API_KEY", raising=False)
+    # anthropic / groq backends removed (no API key) — ensure absent in tests.
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
     monkeypatch.delenv("LLM_BACKEND", raising=False)
     # Reset detection cache so each test sees the fixture env.
     from src.core import llm_client

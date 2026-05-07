@@ -12,6 +12,7 @@ import os
 import json
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from html import escape as _he
 from statistics import mean
 from typing import Any
 
@@ -410,6 +411,36 @@ def self_reflect(state: AgentState) -> dict:
     topic = state.get("topic", "")
     iteration = state.get("iteration", 0)
 
+    # ── [A5] 建立覆蓋矩陣：每季資料品質指標 ──────────────────────────────
+    coverage_matrix: dict = {}
+    for q, chunks in retrieved.items():
+        scores = [
+            c.get("score", 0.0) for c in chunks
+            if isinstance(c.get("score"), (int, float))
+        ]
+        pages = sorted({
+            c.get("payload", {}).get("source_page")
+            for c in chunks
+            if c.get("payload", {}).get("source_page") is not None
+        })[:5]
+        # 若本季在矛盾比對中有引文驗證失敗，標記 quote_verified=False
+        q_failed = any(
+            c.get("analysis", {}).get("verification_failed")
+            for c in contradictions
+            if c.get("quarter_a") == q or c.get("quarter_b") == q
+        )
+        top_excerpt = ""
+        if chunks:
+            top_excerpt = (chunks[0].get("payload", {}).get("content", "") or "")[:80]
+        coverage_matrix[q] = {
+            "chunk_count": len(chunks),
+            "max_score":   round(max(scores), 3) if scores else 0.0,
+            "avg_score":   round(sum(scores) / len(scores), 3) if scores else 0.0,
+            "source_pages": pages,
+            "quote_verified": not q_failed,
+            "top_excerpt": top_excerpt,
+        }
+
     # 摘要當前證據（控制 prompt 長度）
     quarters = sorted(retrieved.keys())
     chunk_count = sum(len(v) for v in retrieved.values())
@@ -421,11 +452,27 @@ def self_reflect(state: AgentState) -> dict:
             f"{a.get('stance_change','-')} (conf={a.get('confidence',0):.2f})"
         )
 
+    # 格式化覆蓋矩陣給 LLM judge 參考
+    cov_lines = []
+    for q_key, info in sorted(coverage_matrix.items()):
+        v_str = "✓已驗證" if info["quote_verified"] else "⚠引文未驗證"
+        cov_lines.append(
+            f"  {q_key}: {info['chunk_count']}段 "
+            f"max={info['max_score']} avg={info['avg_score']} "
+            f"pages={info['source_pages']} quote={v_str} "
+            f"excerpt=「{info['top_excerpt']}」"
+        )
+    coverage_str = "\n".join(cov_lines) if cov_lines else "（無覆蓋資料）"
+
     prompt = f"""你是嚴謹的研究品管員。評估下列分析是否足以回答使用者問題。
 
 使用者問題：{query}
 公司：{company}　主題：{topic}
 已檢索季度：{quarters}（共 {chunk_count} 段）
+
+各季覆蓋品質：
+{coverage_str}
+
 矛盾比對結果：
 {chr(10).join(contradiction_summary) if contradiction_summary else "（無）"}
 承諾追蹤：{len(promises)} 條
@@ -439,10 +486,10 @@ def self_reflect(state: AgentState) -> dict:
 }}
 
 評分準則：
-- 1.0：跨季資料完整、矛盾結論信心度高、能直接回答問題
-- 0.7~0.9：可回答但有小缺漏
-- 0.5~0.7：覆蓋不足或某些立場判斷可疑
-- < 0.5：嚴重資訊不足
+- 1.0：跨季資料完整、引文已驗證、矛盾結論信心度高、能直接回答問題
+- 0.7~0.9：可回答但有小缺漏或部分引文為模糊匹配
+- 0.5~0.7：覆蓋不足、引文驗證失敗或某些立場判斷可疑
+- < 0.5：嚴重資訊不足、多季引文驗證失敗
 gaps 應指出「retrieve 還沒抓到但對回答有幫助」的主題（如：缺乏 2024Q4 毛利率展望、未涵蓋 AI 產能 capex 規劃）。最多 4 條。
 """
 
@@ -490,19 +537,34 @@ gaps 應指出「retrieve 還沒抓到但對回答有幫助」的主題（如：
     if do_retry:
         log.append(f"  🔄 觸發重查（第 {iteration + 1} 次）")
         if gaps:
-            new_sub_queries = [
-                {
+            # [A3+] tool_hint：依 gap 語意判斷工具；
+            # 含「新聞/市場/最新/外部/競爭/產業」關鍵字 → tavily；其餘 → qdrant
+            _NEWS_KWS = ("新聞", "市場", "最新", "外部", "競爭", "產業")
+            new_sub_queries = []
+            for i, gap in enumerate(gaps):
+                tool = "tavily" if any(kw in gap for kw in _NEWS_KWS) else "qdrant"
+                new_sub_queries.append({
                     "id": f"gap_{i}",
                     "query": f"{company} {gap}",
                     "purpose": f"補強：{gap[:20]}",
-                    "tool": "qdrant",
-                }
-                for i, gap in enumerate(gaps)
-            ]
+                    "tool": tool,
+                    "tool_hint": "gap_fill",  # 標記此為 gap-filling 查詢，供 retrieval 日誌用
+                })
             log.append(f"  → 依 gaps 重建 {len(new_sub_queries)} 條 sub_queries")
         else:
             # 無 gaps（LLM 失敗）時，保留原 sub_queries（不再加「詳細說明」雜訊）
             log.append("  → 無 gaps，沿用原 sub_queries 重試")
+
+    # [A6] 棄權路徑：重試次數用盡且信心度仍嚴重不足（< 0.4）。
+    # 避免 report_generator 用極少資料生成不可靠報告，對使用者造成誤導。
+    # 門檻 0.4（非 0.75）：預留空間——0.4~0.75 的報告雖有缺漏但仍有參考價值。
+    abstain = False
+    if not do_retry and score < 0.4:
+        abstain = True
+        log.append(
+            f"  ❌ 三輪後資料嚴重不足（信心度 {score:.2f} < 0.40），"
+            "進入棄權模式，不生成可能誤導的報告"
+        )
 
     return {
         "confidence": score,
@@ -510,6 +572,8 @@ gaps 應指出「retrieve 還沒抓到但對回答有幫助」的主題（如：
         "reflection_gaps": gaps,
         "iteration": iteration + 1,
         "sub_queries": new_sub_queries,
+        "coverage_matrix": coverage_matrix,
+        "abstain": abstain,
         "steps_log": log,
     }
 
@@ -532,12 +596,78 @@ def report_generator(state: AgentState) -> dict:
     stock = state.get("stock_data", {})
     confidence = state.get("confidence", 1.0)
 
+    # [A6] 棄權路徑：資料嚴重不足，輸出說明訊息取代可能誤導的分析報告
+    if state.get("abstain"):
+        issues = state.get("reflection_issues", [])
+        gaps = state.get("reflection_gaps", [])
+        abstain_sections = [
+            "# ⚠️ EarningsWatch — 資料不足，無法完成分析",
+            f"**公司**：{company}　**主題**：{topic}　"
+            f"**分析信心度**：{confidence:.0%}（低於可靠門檻）",
+            "",
+            "## 系統說明",
+            "",
+            "三輪查詢後，仍未取得足夠的法說會資料來可靠回答您的問題。"
+            "為避免生成可能誤導的分析，系統選擇不輸出報告。",
+            "",
+        ]
+        if issues:
+            abstain_sections.append("**發現的問題：**")
+            for issue in issues:
+                abstain_sections.append(f"- {issue}")
+            abstain_sections.append("")
+        if gaps:
+            abstain_sections.append("**仍缺乏的資訊（供參考）：**")
+            for gap in gaps:
+                abstain_sections.append(f"- {gap}")
+            abstain_sections.append("")
+        abstain_sections += [
+            "**建議：**",
+            "- 確認相關季度的 PDF 已匯入並完成 embedding（`python scripts/run_ingestion.py`）",
+            "- 嘗試縮小查詢範圍（在左側選單指定特定季度）",
+            "- 更換查詢主題關鍵字（如「AI需求」→「CoWoS 先進封裝」）",
+        ]
+        final_report = "\n".join(abstain_sections)
+        log.append(f"  ⚠ 棄權報告生成（信心度 {confidence:.2f}）")
+        return {"final_report": final_report, "steps_log": log}
+
     # ── 組裝報告內容 ───────────────────────────────────────────────────
     sections = [
         f"# 🕵️ EarningsWatch 偵查報告",
         f"**公司**：{company}　**主題**：{topic}　**分析信心度**：{confidence:.0%}",
         "",
     ]
+
+    # ── 直接回答使用者問題 ──────────────────────────────────────────────
+    # 彙整所有有主題相關內容的季度 chunks，送 LLM 合成一段直接回答。
+    # 只使用分數最高的 chunk（retrieved 已按 score 降序），每季取前 2 筆，
+    # 限制總長度避免 token 超限。
+    user_query = state.get("query", "")
+    if user_query and retrieved:
+        all_chunks: list[str] = []
+        for q_label in sorted(retrieved.keys()):
+            for chunk in retrieved[q_label][:2]:
+                c_text = chunk.get("payload", {}).get("content", "").strip()
+                if c_text:
+                    all_chunks.append(f"[{q_label}] {c_text}")
+        combined = "\n\n".join(all_chunks)[:4000]  # [c] 防 token 超限
+
+        if combined:
+            direct_answer_prompt = (
+                f"你是台積電法說會研究員。以下是從多季法說會逐字稿中擷取的相關段落：\n\n"
+                f"{combined}\n\n"
+                f"請根據上述資料，用繁體中文直接、具體地回答以下問題（150-300字）。"
+                f"只引用上方資料所涵蓋的事實，不要推測或補充資料以外的內容。\n\n"
+                f"問題：{user_query}"
+            )
+            try:
+                direct_answer = llm_chat(direct_answer_prompt, max_tokens=600, mode="demo")
+                sections.append("## 直接回答")
+                sections.append(_he(direct_answer.strip()))
+                sections.append("")
+                log.append("  ✅ 直接回答段落生成完成")
+            except Exception as e:
+                log.append(f"  ⚠ 直接回答生成失敗：{e}")
 
     # 矛盾摘要
     has_contradiction = any(
@@ -553,22 +683,32 @@ def report_generator(state: AgentState) -> dict:
             sections.append(
                 f"### {icon} {c['quarter_a']} vs {c['quarter_b']}"
             )
-            sections.append(f"- **立場變化**：{a.get('stance_change', '-')}")
-            sections.append(f"- **具體改變**：{a.get('change_detail', '-')}")
+            # [f] defense-in-depth：LLM 回傳字串用 html.escape 處理，
+            #     雖 final_report 目前以 st.markdown()（無 unsafe_allow_html）渲染，
+            #     但提前轉義可防止未來渲染方式改變時的 XSS 風險。
+            sections.append(f"- **立場變化**：{_he(a.get('stance_change', '-'))}")
+            sections.append(f"- **具體改變**：{_he(a.get('change_detail', '-'))}")
             if a.get("evidence_early"):
                 cite_a = ""
                 if c.get("sources_a"):
                     s = c["sources_a"][0]
-                    cite_a = f"  ＜{s.get('file','')} p.{s.get('page','?')}＞"
-                sections.append(f"- **{c['quarter_a']} 原文**：「{a['evidence_early']}」{cite_a}")
+                    cite_a = f"  ＜{_he(str(s.get('file','')))} p.{s.get('page','?')}＞"
+                # [f] 模糊匹配通過的引文加 `～` 提示原文措辭可能略有差異
+                fuzzy_a = "～" if a.get("evidence_early_fuzzy") else ""
+                sections.append(
+                    f"- **{c['quarter_a']} 原文**：「{_he(a['evidence_early'])}」{fuzzy_a}{cite_a}"
+                )
             if a.get("evidence_later"):
                 cite_b = ""
                 if c.get("sources_b"):
                     s = c["sources_b"][0]
-                    cite_b = f"  ＜{s.get('file','')} p.{s.get('page','?')}＞"
-                sections.append(f"- **{c['quarter_b']} 原文**：「{a['evidence_later']}」{cite_b}")
+                    cite_b = f"  ＜{_he(str(s.get('file','')))} p.{s.get('page','?')}＞"
+                fuzzy_b = "～" if a.get("evidence_later_fuzzy") else ""
+                sections.append(
+                    f"- **{c['quarter_b']} 原文**：「{_he(a['evidence_later'])}」{fuzzy_b}{cite_b}"
+                )
             if a.get("follow_up_question"):
-                sections.append(f"- **💡 建議追問**：{a['follow_up_question']}")
+                sections.append(f"- **💡 建議追問**：{_he(a['follow_up_question'])}")
             sections.append("")
 
     # 承諾追蹤
@@ -577,9 +717,11 @@ def report_generator(state: AgentState) -> dict:
         sections.append("> 未偵測到可追蹤的前瞻承諾")
     else:
         for p in promises:
+            # [f] defense-in-depth：承諾內容與判斷說明來自 LLM，提前轉義
             sections.append(
-                f"- {p['status']} [{p['promise_quarter']} 承諾] **{p['content']}**  \n"
-                f"  後續（{p['followup_quarter']}）：{p['detail']}"
+                f"- {p['status']} [{p['promise_quarter']} 承諾] "
+                f"**{_he(p['content'])}**  \n"
+                f"  後續（{p['followup_quarter']}）：{_he(p['detail'])}"
             )
     sections.append("")
 
