@@ -638,6 +638,37 @@ def report_generator(state: AgentState) -> dict:
         "",
     ]
 
+    # ── 直接回答使用者問題 ──────────────────────────────────────────────
+    # 彙整所有有主題相關內容的季度 chunks，送 LLM 合成一段直接回答。
+    # 只使用分數最高的 chunk（retrieved 已按 score 降序），每季取前 2 筆，
+    # 限制總長度避免 token 超限。
+    user_query = state.get("query", "")
+    if user_query and retrieved:
+        all_chunks: list[str] = []
+        for q_label in sorted(retrieved.keys()):
+            for chunk in retrieved[q_label][:2]:
+                c_text = chunk.get("payload", {}).get("content", "").strip()
+                if c_text:
+                    all_chunks.append(f"[{q_label}] {c_text}")
+        combined = "\n\n".join(all_chunks)[:4000]  # [c] 防 token 超限
+
+        if combined:
+            direct_answer_prompt = (
+                f"你是台積電法說會研究員。以下是從多季法說會逐字稿中擷取的相關段落：\n\n"
+                f"{combined}\n\n"
+                f"請根據上述資料，用繁體中文直接、具體地回答以下問題（150-300字）。"
+                f"只引用上方資料所涵蓋的事實，不要推測或補充資料以外的內容。\n\n"
+                f"問題：{user_query}"
+            )
+            try:
+                direct_answer = llm_chat(direct_answer_prompt, max_tokens=600, mode="demo")
+                sections.append("## 直接回答")
+                sections.append(_he(direct_answer.strip()))
+                sections.append("")
+                log.append("  ✅ 直接回答段落生成完成")
+            except Exception as e:
+                log.append(f"  ⚠ 直接回答生成失敗：{e}")
+
     # 矛盾摘要
     has_contradiction = any(
         c["analysis"].get("has_contradiction") for c in contradictions
