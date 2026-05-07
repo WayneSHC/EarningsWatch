@@ -184,6 +184,31 @@ with st.sidebar:
     except Exception:
         pass
 
+    # ── Token / Cost telemetry（本次 session 累計）─────────────────────────
+    # 只在已有資料時顯示，避免空白佔版面
+    try:
+        from src.core import telemetry as _tm
+        _summary = _tm.summary()
+        if _summary["total_calls"] > 0:
+            st.divider()
+            st.caption("📊 **本次 Session LLM 用量**")
+            cols = st.columns(2)
+            cols[0].metric("呼叫次數", _summary["total_calls"])
+            cols[1].metric(
+                "預估成本",
+                f"${_summary['estimated_cost_usd']:.4f}",
+                help="依 OpenAI / Gemini / Cohere 公開定價估算（非實際帳單）"
+            )
+            st.caption(
+                f"Tokens：{_summary['total_tokens']:,}  "
+                f"（input {_summary['prompt_tokens']:,} / output {_summary['completion_tokens']:,}）"
+            )
+            if st.button("🔄 重置統計", key="_reset_telemetry"):
+                _tm.reset()
+                st.rerun()
+    except Exception:
+        pass
+
 # ── 主區域 ───────────────────────────────────────────────────────────────────
 st.title("🕵️ EarningsWatch")
 st.markdown("**法說會 Agentic RAG 一致性審計平台** — 追蹤管理層跨季發言，找矛盾・追承諾・抓話術")

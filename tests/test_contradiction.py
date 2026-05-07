@@ -96,6 +96,42 @@ class TestUnwrap:
 
 
 # ──────────────────────────────────────────────────────────────────────────
+# _is_boilerplate — legal disclaimer filter
+# ──────────────────────────────────────────────────────────────────────────
+
+class TestIsBoilerplate:
+    def test_english_forward_looking(self):
+        text = "These statements are forward-looking statements subject to significant risks."
+        assert cd._is_boilerplate(text) is True
+
+    def test_english_safe_harbor(self):
+        text = "This presentation is made under the Safe Harbor provisions."
+        assert cd._is_boilerplate(text) is True
+
+    def test_chinese_forward_looking_canonical(self):
+        text = "本資料所載之前瞻性陳述涉及風險與不確定性，實際結果可能與預期有所不同。"
+        assert cd._is_boilerplate(text) is True
+
+    def test_chinese_alternate_phrasing(self):
+        # 「前瞻性敘述」是另一種譯法
+        text = "前瞻性敘述受多項因素影響"
+        assert cd._is_boilerplate(text) is True
+
+    def test_full_width_whitespace_normalized(self):
+        # 全形空白與換行不應阻擋比對
+        text = "前瞻性　陳述\n\n  涉及風險"
+        assert cd._is_boilerplate(text) is True
+
+    def test_real_topic_content_not_flagged(self):
+        text = "本季 AI 需求強勁，HPC 平台營收年增 35%，毛利率優於上季。"
+        assert cd._is_boilerplate(text) is False
+
+    def test_case_insensitive_english(self):
+        text = "FORWARD-LOOKING STATEMENTS SUBJECT TO SIGNIFICANT RISKS"
+        assert cd._is_boilerplate(text) is True
+
+
+# ──────────────────────────────────────────────────────────────────────────
 # detect_contradiction — type guards
 # ──────────────────────────────────────────────────────────────────────────
 

@@ -86,7 +86,7 @@ class TestChatCascade:
 
         def fake_dispatch(backend, prompt, model, max_tokens):
             calls.append(backend)
-            return "Pong."
+            return "Pong.", 0, 0
 
         monkeypatch.setattr(lc, "_dispatch", fake_dispatch)
         out = lc.chat("ping")
@@ -101,7 +101,7 @@ class TestChatCascade:
             if backend == "openai":
                 # Pure quota error (no "429" → that hits rate-limit branch instead)
                 raise RuntimeError("RESOURCE_EXHAUSTED: quota exceeded")
-            return f"reply from {backend}"
+            return f"reply from {backend}", 0, 0
 
         monkeypatch.setattr(lc, "_dispatch", fake_dispatch)
         out = lc.chat("hello")
@@ -118,7 +118,7 @@ class TestChatCascade:
             attempts.append(backend)
             if backend == "openai":
                 raise RuntimeError("Your credit balance is too low")
-            return "ok"
+            return "ok", 0, 0
 
         monkeypatch.setattr(lc, "_dispatch", fake_dispatch)
         out = lc.chat("hi")
@@ -133,7 +133,7 @@ class TestChatCascade:
             attempts.append(backend)
             if backend == "openai":
                 raise RuntimeError("404 NOT_FOUND model_not_found")
-            return "ok"
+            return "ok", 0, 0
 
         monkeypatch.setattr(lc, "_dispatch", fake_dispatch)
         out = lc.chat("hi")
@@ -148,7 +148,7 @@ class TestChatCascade:
             attempts.append(backend)
             if backend == "openai":
                 raise RuntimeError("503 service unavailable")
-            return "ok"
+            return "ok", 0, 0
 
         monkeypatch.setattr(lc, "_dispatch", fake_dispatch)
         assert lc.chat("hi") == "ok"
@@ -162,7 +162,7 @@ class TestChatCascade:
             attempts.append(backend)
             if backend == "openai":
                 raise RuntimeError("429 Too Many Requests: rate limit reached")
-            return "ok"
+            return "ok", 0, 0
 
         monkeypatch.setattr(lc, "_dispatch", fake_dispatch)
         assert lc.chat("hi") == "ok"
@@ -256,7 +256,7 @@ def test_quota_marker_recognized(monkeypatch, err_msg):
         attempts.append(backend)
         if backend == "openai":
             raise RuntimeError(err_msg)
-        return "ok"
+        return "ok", 0, 0
 
     monkeypatch.setattr(lc, "_dispatch", fake_dispatch)
     out = lc.chat("hi")
