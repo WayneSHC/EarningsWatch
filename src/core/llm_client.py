@@ -3,8 +3,8 @@ src/core/llm_client.py
 統一 LLM 呼叫介面：支援三種後端，一個環境變數切換
 
 支援的後端（在 .env 設定 LLM_BACKEND）：
-  openai    → GPT-5o / GPT-5o-mini ★ 主力
-  gemini    → Gemini 3.0 Flash（免費額度高）
+  openai    → GPT-5 / GPT-5-mini ★ 主力
+  gemini    → Gemini 2.5 Flash（免費額度高）
   cohere    → Command R+
 
 未設定 LLM_BACKEND 時自動偵測順序：
@@ -53,14 +53,18 @@ _INJECTION_GUARD = (
 
 
 # ── 模型設定表（2026-05 更新至最新穩定版本）────────────────────────────────
+# [b] 2026-05-08 修正：先前 BACKEND_MODELS 用 `gpt-5o` / `gemini-3.0-flash`
+#     在實際 API 回 404（gpt-5o 是 typo，正確名稱無 `o` 後綴；
+#     gemini-3.0-flash 不存在，3 系列目前只有 preview 版）。
+#     經 OpenAI / Gemini models.list() API 驗證後改用以下穩定版本。
 BACKEND_MODELS = {
     "openai": {
-        "dev":  "gpt-5o-mini",                  # GPT-5o-mini — 開發 / 高頻呼叫
-        "demo": "gpt-5o",                       # GPT-5o — 主力 ★ fallback 第一順位
+        "dev":  "gpt-5-mini",                   # GPT-5-mini — 開發 / 高頻呼叫
+        "demo": "gpt-5",                        # GPT-5 — 主力 ★ fallback 第一順位
     },
     "gemini": {
-        "dev":  "gemini-3.0-flash",
-        "demo": "gemini-3.0-flash",             # Gemini 3.0 Flash — 免費額度大 ★ fallback 第二順位
+        "dev":  "gemini-2.5-flash",
+        "demo": "gemini-2.5-flash",             # Gemini 2.5 Flash — 免費額度大 ★ fallback 第二順位
     },
     "cohere": {
         "dev":  "command-r7b-12-2024",
@@ -105,8 +109,8 @@ def _detect_backend() -> str:
     raise EnvironmentError(
         "❌ 找不到任何 LLM API Key！\n"
         "請在 .env 填入以下任一個：\n"
-        "  OPENAI_API_KEY     → GPT-5o / GPT-5o-mini ★ 主力推薦\n"
-        "  GEMINI_API_KEY     → Gemini 3.0 Flash（免費額度大）\n"
+        "  OPENAI_API_KEY     → GPT-5 / GPT-5-mini ★ 主力推薦\n"
+        "  GEMINI_API_KEY     → Gemini 2.5 Flash（免費額度大）\n"
         "  COHERE_API_KEY     → Command R+"
     )
 
@@ -147,7 +151,7 @@ def _call_openai_compat(prompt: str, model: str, max_tokens: int,
     """
     OpenAI SDK 相容介面，回傳 (text, prompt_tokens, completion_tokens)。
 
-    [b] 參數相容性：較新模型（gpt-5*、o1 系列）改用 `max_completion_tokens`，
+    [b] 參數相容性：較新模型（gpt-5 / gpt-4.1 / o1 系列）改用 `max_completion_tokens`，
         舊模型仍接受 `max_tokens`。先試新參數，失敗再退回舊參數，雙向相容。
         TypeError 通常是 SDK 層 unexpected keyword；BadRequestError 也可能是
         伺服器端說「請改用 max_completion_tokens」，兩種都重試。
@@ -267,8 +271,8 @@ _QUOTA_MARKERS = (
 
 # [b] 給使用者看的中文友善訊息（不含技術細節）
 _BACKEND_LABEL = {
-    "openai": "OpenAI (GPT-5o)",
-    "gemini": "Gemini 3.0 Flash",
+    "openai": "OpenAI (GPT-5)",
+    "gemini": "Gemini 2.5 Flash",
     "cohere": "Cohere Command R+",
 }
 

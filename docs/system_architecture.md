@@ -114,14 +114,14 @@ PDF（data/raw_pdfs/）
 
 | 後端 | SDK | 使用模型（Demo / Dev） | 備註 |
 |---|---|---|---|
-| **OpenAI** ★ | openai ≥ 1.50 | gpt-5o / gpt-5o-mini | 主力，2026-05 更新 |
-| **Gemini** | google-genai ≥ 1.0 | gemini-3.0-flash / gemini-3.0-flash | 免費額度大，主力備援 |
+| **OpenAI** ★ | openai ≥ 1.50 | gpt-5 / gpt-5-mini | 主力，2026-05-08 校正模型名 |
+| **Gemini** | google-genai ≥ 1.0 | gemini-2.5-flash / gemini-2.5-flash | 免費額度大，主力備援 |
 | **Cohere** | cohere ≥ 5.0 | command-r-plus-08-2024 / command-r7b-12-2024 | 同時用於 Rerank |
 
 > ⛔ 已移除：anthropic、groq（無 API Key）。  
 > 切換方式：設定環境變數 `LLM_BACKEND=openai`（或 gemini / cohere）。  
 > 未設定時自動偵測順序：`openai → gemini → cohere`  
-> 🔄 任一後端 quota / 429 rate limit / 401-403 / 404 / 503 → 印出友善中文訊息（例：`⚠️ OpenAI (GPT-5o) 今日 token / 配額已用完，自動切換下一個後端…`）並切換下一個。網路 / timeout 錯誤同後端重試 1 次後再切換。
+> 🔄 任一後端 quota / 429 rate limit / 401-403 / 404 / 503 → 印出友善中文訊息（例：`⚠️ OpenAI (GPT-5) 今日 token / 配額已用完，自動切換下一個後端…`）並切換下一個。網路 / timeout 錯誤同後端重試 1 次後再切換。
 
 ### 5.3 向量資料庫
 

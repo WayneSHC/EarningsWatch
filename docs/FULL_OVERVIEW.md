@@ -182,8 +182,8 @@ EarningsWatch/
 
 | 後端 | Demo (主力) | Dev (高頻) |
 |---|---|---|
-| OpenAI ★ | gpt-5o | gpt-5o-mini |
-| Gemini | gemini-3.0-flash | gemini-3.0-flash |
+| OpenAI ★ | gpt-5 | gpt-5-mini |
+| Gemini | gemini-2.5-flash | gemini-2.5-flash |
 | Cohere | command-r-plus-08-2024 | command-r7b-12-2024 |
 
 > ⛔ 已移除：anthropic、groq（無 API Key 不再支援）。

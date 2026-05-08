@@ -159,7 +159,7 @@ class TestSelfReflectCostGuard:
         )
         # Spend $0.10 (well under default $0.50 budget)
         telemetry.record(telemetry.LLMCall(
-            backend="openai", model="gpt-5o-mini",
+            backend="openai", model="gpt-5-mini",
             prompt_tokens=10, completion_tokens=10, cost_usd=0.10,
         ))
 
@@ -173,7 +173,7 @@ class TestSelfReflectCostGuard:
         )
         # Spend $0.60 (exceeds default $0.50 budget)
         telemetry.record(telemetry.LLMCall(
-            backend="openai", model="gpt-5o",
+            backend="openai", model="gpt-5",
             prompt_tokens=100, completion_tokens=200, cost_usd=0.60,
         ))
 
@@ -188,13 +188,13 @@ class TestSelfReflectCostGuard:
         )
         # $0.45 already spent BEFORE this query (sibling/prior queries)
         telemetry.record(telemetry.LLMCall(
-            backend="openai", model="gpt-5o", cost_usd=0.45,
+            backend="openai", model="gpt-5", cost_usd=0.45,
         ))
         # Capture baseline as if intent_classifier just ran
         baseline = telemetry.summary()["estimated_cost_usd"]
         # This query adds only $0.10 → total $0.55 but query cost = $0.10 < budget
         telemetry.record(telemetry.LLMCall(
-            backend="openai", model="gpt-5o", cost_usd=0.10,
+            backend="openai", model="gpt-5", cost_usd=0.10,
         ))
 
         out = nodes.self_reflect(self._state(cost_baseline_usd=baseline))
@@ -209,7 +209,7 @@ class TestSelfReflectCostGuard:
         )
         # Even if budget would be exceeded
         telemetry.record(telemetry.LLMCall(
-            backend="openai", model="gpt-5o", cost_usd=10.0,
+            backend="openai", model="gpt-5", cost_usd=10.0,
         ))
 
         # Strong data — 2+ quarters, 3+ chunks → no hard floor penalty
