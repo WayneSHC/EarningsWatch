@@ -22,12 +22,23 @@ from typing import Optional
 
 # ── [c] 各家公開定價（USD per 1M tokens；2026-05 參考值）─────────────────
 # 來源：OpenAI Pricing、Google AI Studio、Cohere Pricing 公開頁面。
-# 價格會變動，這只是估算值；缺項時 estimate_cost() 回 0。
+# 價格會變動，這只是估算值；缺項時 estimate_cost() 回 0（graceful degrade）。
+#
+# [b] 2026-05-08 修正：先前用 `gpt-5o` / `gemini-3.0-flash` 是錯誤模型名（API 回 404），
+#     已校正成 `gpt-5` / `gpt-5-mini` / `gemini-2.5-flash`。
+#     舊鍵保留無害（缺項會被忽略），但若 BACKEND_MODELS 仍意外吐回舊名也不會匹配。
 _PRICING: dict[tuple[str, str], tuple[float, float]] = {
     # (backend, model): (input_per_1m_usd, output_per_1m_usd)
-    ("openai", "gpt-5o"):                   (5.00, 15.00),
-    ("openai", "gpt-5o-mini"):              (0.15,  0.60),
-    ("gemini", "gemini-3.0-flash"):         (0.075, 0.30),
+    # ── 現役主力（2026-05 校正後）──
+    ("openai", "gpt-5"):                    (5.00, 15.00),
+    ("openai", "gpt-5-mini"):               (0.25,  1.25),
+    ("openai", "gpt-4.1"):                  (2.00,  8.00),
+    ("openai", "gpt-4.1-mini"):             (0.40,  1.60),
+    ("openai", "gpt-4o"):                   (2.50, 10.00),
+    ("openai", "gpt-4o-mini"):              (0.15,  0.60),
+    ("gemini", "gemini-2.5-flash"):         (0.075, 0.30),
+    ("gemini", "gemini-2.5-pro"):           (1.25,  5.00),
+    ("gemini", "gemini-2.0-flash"):         (0.075, 0.30),
     ("cohere", "command-r-plus-08-2024"):   (2.50, 10.00),
     ("cohere", "command-r7b-12-2024"):      (0.0375, 0.15),
 }

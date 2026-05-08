@@ -28,15 +28,15 @@ def _clean_registry():
 
 class TestEstimateCost:
     def test_known_model(self):
-        # gpt-5o: 5/1M input, 15/1M output
-        cost = telemetry.estimate_cost("openai", "gpt-5o", 1_000_000, 1_000_000)
+        # gpt-5: 5/1M input, 15/1M output
+        cost = telemetry.estimate_cost("openai", "gpt-5", 1_000_000, 1_000_000)
         assert cost == pytest.approx(20.0)
 
     def test_partial_tokens(self):
-        # 1k input, 2k output for gpt-5o-mini (0.15 / 0.60)
-        cost = telemetry.estimate_cost("openai", "gpt-5o-mini", 1000, 2000)
-        # 0.00015 + 0.0012 = 0.00135
-        assert cost == pytest.approx(0.00135)
+        # 1k input, 2k output for gpt-5-mini (0.25 / 1.25)
+        cost = telemetry.estimate_cost("openai", "gpt-5-mini", 1000, 2000)
+        # 0.00025 + 0.0025 = 0.00275
+        assert cost == pytest.approx(0.00275)
 
     def test_unknown_model_returns_zero(self):
         # Pricing table miss must not raise; just return 0
@@ -55,7 +55,7 @@ class TestEstimateCost:
 class TestRegistry:
     def test_record_and_summary(self):
         telemetry.record(telemetry.LLMCall(
-            backend="openai", model="gpt-5o-mini",
+            backend="openai", model="gpt-5-mini",
             prompt_tokens=100, completion_tokens=50, duration_ms=200.0,
             cost_usd=0.001,
         ))
@@ -71,11 +71,11 @@ class TestRegistry:
 
     def test_aggregates_across_backends(self):
         telemetry.record(telemetry.LLMCall(
-            backend="openai", model="gpt-5o-mini",
+            backend="openai", model="gpt-5-mini",
             prompt_tokens=100, completion_tokens=50, cost_usd=0.001,
         ))
         telemetry.record(telemetry.LLMCall(
-            backend="gemini", model="gemini-3.0-flash",
+            backend="gemini", model="gemini-2.5-flash",
             prompt_tokens=200, completion_tokens=80, cost_usd=0.0001,
         ))
         s = telemetry.summary()
@@ -87,10 +87,10 @@ class TestRegistry:
 
     def test_failed_calls_counted_separately(self):
         telemetry.record(telemetry.LLMCall(
-            backend="openai", model="gpt-5o", error="RateLimitError"
+            backend="openai", model="gpt-5", error="RateLimitError"
         ))
         telemetry.record(telemetry.LLMCall(
-            backend="gemini", model="gemini-3.0-flash",
+            backend="gemini", model="gemini-2.5-flash",
             prompt_tokens=10, completion_tokens=5,
         ))
         s = telemetry.summary()
@@ -138,7 +138,7 @@ class TestLLMClientIntegration:
         assert s["total_calls"] == 1
         assert s["prompt_tokens"] == 12
         assert s["completion_tokens"] == 5
-        # gpt-5o pricing applied
+        # gpt-5 pricing applied
         assert s["estimated_cost_usd"] > 0
 
     def test_fallback_records_both_failure_and_success(self, monkeypatch):
