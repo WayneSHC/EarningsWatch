@@ -206,6 +206,147 @@ CI workflow 加一步：
 
 ---
 
+## #6 — test: 補上 src/ui/chart.py 的 unit tests
+
+**優先度**：🟡 Medium
+**預估**：1-2 小時
+**動工觸發**：下次要修改 `chart.py` / 趨勢圖邏輯前；或趨勢圖出現使用者抱怨的行為
+
+### 為什麼
+
+`src/ui/chart.py` 263 行，**0 個 test 涵蓋**。`build_stance_series` 是純資料轉換
+（grouping by quarter_b、取最顯著非零 delta、把「無關」季度放進 timeline 當 delta=0），
+被 single + multi 兩個 view 同時用 — 一旦 regress，兩個模式的趨勢圖一起壞。
+
+### 怎麼做
+
+1. 新增 `tests/test_chart.py`
+2. 涵蓋：
+   - 空輸入 → `[]`
+   - 單一 contradiction → series 含一筆
+   - 同 quarter_b 多筆 → 取最顯著的非零 delta
+   - 「無關」/「維持不變」季度 → `delta=0` 但仍出現在 timeline
+   - boilerplate（兩段 evidence 完全相同）→ 該 quarter_b 視為非有效
+3. 不需測 `render_trend_chart`（Plotly figure 物件結構難 assert，視覺輸出由人眼驗）
+
+### 驗收條件
+
+- [ ] 至少 5 個 test 通過
+- [ ] 既有 144 個 pytest 全綠
+
+---
+
+## #7 — test: 補上 src/core/comparison.py 的 unit tests
+
+**優先度**：🟡 Medium
+**預估**：1-2 小時
+**動工觸發**：下次要修改多公司比較邏輯前；或多公司模式出現異常結果
+
+### 為什麼
+
+`src/core/comparison.py` 有 `build_comparison_table` / `synthesize_diff` /
+`run_multi_company` 三個關鍵函式，**0 個 test**。多公司模式（P0/P1 期間新加）
+是目前最年輕的功能，回歸風險最高。
+
+### 怎麼做
+
+1. 新增 `tests/test_comparison.py`
+2. 涵蓋：
+   - `build_comparison_table`：跨公司季度對齊、缺資料處理、stance_change 翻譯
+   - `synthesize_diff`：mock LLM 回傳，驗證 prompt 結構與 fallback
+   - `run_multi_company`：ThreadPoolExecutor 路徑可在單一公司失敗時保留其他結果
+     （error 寫進回傳 dict 而不是 raise）
+3. 不需測 LLM 內容（用 monkeypatch 樁掉 `chat()`）
+
+### 驗收條件
+
+- [ ] 至少 6 個 test 通過
+- [ ] run_multi_company 失敗隔離行為有明確覆蓋
+
+---
+
+## #8 — chore: .env.example 補齊 LangSmith / LLM_PAIR_WORKERS 變數
+
+**優先度**：🟢 Low
+**預估**：5 分鐘
+**動工觸發**：anytime；新人接手時最有感
+
+### 為什麼
+
+程式有讀但 `.env.example` 沒列：
+- `LANGSMITH_API_KEY` / `LANGSMITH_PROJECT` / `LANGSMITH_TRACING`
+- `LANGCHAIN_API_KEY` / `LANGCHAIN_PROJECT` / `LANGCHAIN_TRACING_V2`（舊命名相容）
+- `LLM_PAIR_WORKERS`（contradiction batch_detect 並行度）
+
+新人想啟用 LangSmith tracing 得 grep 整個 codebase 才知道變數名 — 是純資訊不對稱
+造成的摩擦，5 分鐘就能除掉。
+
+### 怎麼做
+
+在 `.env.example` 適當位置加上有註解的 placeholder（留空 = 不啟用）。
+順便檢查 `CLAUDE.md` 的環境變數區塊是否同步更新。
+
+---
+
+## #9 — fix: 改用原子寫入避免 ingestion_log.json 損毀
+
+**優先度**：🟢 Low
+**預估**：15 分鐘
+**動工觸發**：實際發生 ingestion log 損毀（症狀：下次跑 ingestion 把所有 PDF 重做一遍）
+
+### 為什麼
+
+`scripts/run_ingestion.py:_save_log()` 用 `Path.write_text(json.dumps(...))`，
+**非原子寫入**。寫到一半遇到 SIGKILL / 斷電 / OOM 會留下半截 JSON，
+下次 `_load_log` 解析失敗 → 回傳空 dict → 把所有已匯入 PDF 當作新檔重做。
+
+### 怎麼做
+
+```python
+def _save_log(log: dict) -> None:
+    PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = INGESTION_LOG.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(log, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, INGESTION_LOG)   # POSIX 原子 rename
+```
+
+`os.replace` 在同一檔案系統內是原子的 — 要嘛新檔完全就位，要嘛舊檔還在。
+
+### 為什麼緩
+
+- 觸發條件少：必須是寫的瞬間（毫秒級）才會中斷
+- 即使損毀，最壞情況是「重做一次匯入」，不會丟資料
+- 本機開發不會碰到，CI / production 才有意義
+
+但「為什麼緩」也是「為什麼不直接修 — 反正只 15 分鐘」。看到這項就修了吧。
+
+---
+
+## #10 — docs: CLAUDE.md PDF 字型描述與實作對齊
+
+**優先度**：🟢 Low
+**預估**：5 分鐘
+**動工觸發**：anytime（純文件更新）
+
+### 為什麼
+
+`CLAUDE.md` 寫：
+
+> PDF: `fpdf2` + STHeiti font (`/System/Library/Fonts/STHeiti Light.ttc`)
+
+但 `src/ui/export.py:_resolve_cjk_font()` 實際有完整 cascade：
+STHeiti（macOS）→ NotoSansCJK（Debian/Ubuntu）→ WQYZenHei → AR PL UMing。
+
+文件落後實作會誤導兩件事：(a) 部署到 Linux 時誤以為 PDF 匯出會壞 (b) 有人想改字型
+時看錯位置。
+
+### 怎麼做
+
+把 `CLAUDE.md` 的「Export」節點改寫，列出實際的 fallback 順序，並 cross-ref
+`packages.txt` 在 Streamlit Cloud / Linux 部署的角色（裝 `fonts-noto-cjk`）。
+
+---
+
 ## 不做的事（明確 out-of-scope）
 
 - ❌ **AI agent 替代分析師寫研究報告**：本工具是審計工具，不取代分析判斷
@@ -224,6 +365,7 @@ CI workflow 加一步：
 | 2026-05-09 | #5 完成（CI smoke test）；#2 完成（views/ 拆分） |
 | 2026-05-09 | #1 補登已完成（事實上由先前 P1-8 UIState 重構達成） |
 | 2026-05-09 | #3 / #4 加上 GCP 部署情境註記（PostgresSaver / Cloud Armor） |
+| 2026-05-09 | 新增 #6–#10：chart/comparison test、.env.example、ingestion 原子寫入、PDF 字型 doc |
 
 > 新增項目請：①給優先度 ②寫動工觸發條件 ③估時。
 > 沒有觸發條件的項目視為「想要但不必要」，不應佔用排程。
