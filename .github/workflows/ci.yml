@@ -41,3 +41,55 @@ jobs:
         # don't blow up.
         run: |
           pytest tests/ -v --tb=short
+
+      - name: Streamlit smoke test
+        # py_compile catches syntax errors but not runtime issues like a misplaced
+        # set_page_config() or a broken import order. Boot Streamlit headless and
+        # hit /_stcore/script-health-check, which executes the script via
+        # does_script_run_without_error() and returns 200 + "ok" only on a clean run.
+        env:
+          # Module-level code paths read these via os.getenv; tests use the same dummy
+          # values in tests/conftest.py.
+          OPENAI_API_KEY: test-openai
+          GEMINI_API_KEY: test-gemini
+        run: |
+          set -e
+          streamlit run src/ui/app.py \
+            --server.port 8501 \
+            --server.headless true \
+            --server.scriptHealthCheckEnabled true \
+            > /tmp/streamlit.log 2>&1 &
+          STREAMLIT_PID=$!
+
+          cleanup() { kill "$STREAMLIT_PID" 2>/dev/null || true; }
+          trap cleanup EXIT
+
+          # Wait up to 60s for the server to come up; bail early if Streamlit died.
+          for _ in $(seq 1 60); do
+            if curl -fsS http://localhost:8501/_stcore/health > /dev/null 2>&1; then
+              break
+            fi
+            if ! kill -0 "$STREAMLIT_PID" 2>/dev/null; then
+              echo "Streamlit exited before becoming healthy."
+              cat /tmp/streamlit.log
+              exit 1
+            fi
+            sleep 1
+          done
+
+          if ! curl -fsS http://localhost:8501/_stcore/health > /dev/null 2>&1; then
+            echo "Server health check timed out."
+            cat /tmp/streamlit.log
+            exit 1
+          fi
+
+          status=$(curl -s -o /tmp/script_health.txt \
+                       -w "%{http_code}" \
+                       http://localhost:8501/_stcore/script-health-check)
+          body=$(cat /tmp/script_health.txt)
+          if [ "$status" != "200" ] || [ "$body" != "ok" ]; then
+            echo "script-health-check failed (HTTP $status, body='$body')."
+            cat /tmp/streamlit.log
+            exit 1
+          fi
+          echo "Streamlit smoke test passed."
