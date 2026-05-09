@@ -16,7 +16,7 @@
 | 2026-05-09 | `3717df6` | refactor(ui): UIState dataclass — fulfils ROADMAP #1 (session-state 集中) |
 | 2026-05-09 | `2acdc7b` | ci: Streamlit smoke test (script-health-check) — ROADMAP #5 |
 | 2026-05-09 | `d0201f8` | refactor(ui): split app.py into views/single + views/multi — ROADMAP #2 |
-| 2026-05-09 | _pending_ | chore: .env.example LangSmith vars / fix ingestion atomic write / docs PDF font — ROADMAP #8 / #9 / #10 |
+| 2026-05-09 | `32e92f5` | chore: .env.example LangSmith vars / fix ingestion atomic write / docs PDF font — ROADMAP #8 / #9 / #10 |
 
 ---
 
