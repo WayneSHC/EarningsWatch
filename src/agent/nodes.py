@@ -51,11 +51,14 @@ def intent_classifier(state: AgentState) -> dict:
 
     if not company or not topic:
         # 用 LLM 萃取
+        # [P2] topic 不再限定 6 項清單；改為依問題語意自由提煉，僅給範例參考。
+        #      下游 batch_detect / decompose / synthesize_diff 都把 topic 當自由字串使用，
+        #      free-form 不會破壞 pipeline；改善處：UI 不必強迫使用者從固定下拉選擇。
         resp = _llm(f"""從以下問題萃取資訊，只回傳 JSON：
 問題：{state['query']}
 {{
   "company": "公司名（台積電/聯發科/鴻海/台達電）",
-  "topic": "主題（AI需求/毛利率/產能/庫存/展望）",
+  "topic": "主題：依問題語意提煉成 2-8 字短語，例：AI需求 / 毛利率 / CoWoS 產能 / 庫存調整 / 任何具體議題",
   "quarters": ["2024Q1", "2024Q3"] 或 [] 代表全部
 }}""", max_tokens=200)
         try:

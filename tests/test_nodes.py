@@ -6,6 +6,7 @@ Coverage:
   - self_reflect: cost guard sets cost_guard_triggered when budget exceeded (P1-6)
   - should_continue: respects cost_guard_triggered flag
   - parallel_retrieval: target_quarter overrides quarters_filter
+  - intent_classifier: free-form auto-detected topic when UI didn't pick one (P2)
 """
 import pytest
 
@@ -18,6 +19,54 @@ def _reset_telemetry():
     telemetry.reset()
     yield
     telemetry.reset()
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# intent_classifier — auto-detect topic when UI omits it (P2)
+# ──────────────────────────────────────────────────────────────────────────
+
+class TestIntentClassifierAutoTopic:
+    def _state(self, query="台積電 2024 CoWoS 產能瓶頸怎麼說？", company="", topic=""):
+        return {
+            "query": query,
+            "company": company,
+            "topic": topic,
+            "quarters": [],
+        }
+
+    def test_empty_topic_triggers_llm_extract(self, monkeypatch):
+        """UI 沒選主題 → _llm 被呼叫，回傳的 topic 被採用。"""
+        calls = {"n": 0}
+        def fake_llm(prompt, max_tokens=200):
+            calls["n"] += 1
+            return '{"company": "台積電", "topic": "CoWoS 產能", "quarters": []}'
+        monkeypatch.setattr(nodes, "_llm", fake_llm)
+
+        out = nodes.intent_classifier(self._state())
+        assert calls["n"] == 1, "未選 topic 時 _llm 必須被呼叫"
+        assert out["topic"] == "CoWoS 產能"
+        assert out["company"] == "台積電"
+
+    def test_freeform_topic_passes_through(self, monkeypatch):
+        """LLM 回傳非白名單的 free-form topic 也應原樣保留（P2 解除限定）。"""
+        monkeypatch.setattr(
+            nodes, "_llm",
+            lambda *a, **kw: '{"company": "台積電", "topic": "美國亞利桑那建廠進度", "quarters": []}'
+        )
+        out = nodes.intent_classifier(self._state(topic=""))
+        assert out["topic"] == "美國亞利桑那建廠進度"
+
+    def test_ui_topic_skips_llm(self, monkeypatch):
+        """UI 已指定 topic → _llm 不應被呼叫（既有行為，避免回歸）。"""
+        called = {"n": 0}
+        def fake_llm(*a, **kw):
+            called["n"] += 1
+            return '{"company": "x", "topic": "y", "quarters": []}'
+        monkeypatch.setattr(nodes, "_llm", fake_llm)
+
+        out = nodes.intent_classifier(self._state(company="台積電", topic="毛利率"))
+        assert called["n"] == 0, "UI 已給 topic 時 _llm 不應被呼叫"
+        assert out["topic"] == "毛利率"
 
 
 # ──────────────────────────────────────────────────────────────────────────
