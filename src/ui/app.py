@@ -39,6 +39,7 @@ from src.ui.cache import (
     save_to_cache,
     CACHE_PATH,
 )
+from src.ui.state import UIState  # session_state 集中保管
 
 # ── 頁面設定（必須在其他 st 呼叫之前）─────────────────────────────────────
 st.set_page_config(
@@ -49,6 +50,9 @@ st.set_page_config(
 )
 
 st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
+
+# 取得本次 session 的 UIState（首次建立、之後重用同一實例）
+ui = UIState.get()
 
 # ── 常數 ─────────────────────────────────────────────────────────────────────
 COMPANIES = ["台積電", "聯發科", "鴻海", "台達電"]
@@ -222,7 +226,7 @@ from src.core import rate_limiter as _rl
 
 _COOLDOWN_SEC = 10   # 兩次查詢間最短間隔（秒）
 now = time.time()
-last_run = st.session_state.get("last_run_time", 0.0)
+last_run = ui.last_run_time
 session_cooldown = max(0.0, _COOLDOWN_SEC - (now - last_run))
 
 _client_ip = _rl.get_client_ip()
@@ -248,7 +252,7 @@ with col_info:
 # 執行 Agent（只在按下按鈕時執行，結果存入 session_state）
 # ══════════════════════════════════════════════════════════════════════════════
 if run_btn:
-    st.session_state["last_run_time"] = time.time()
+    ui.last_run_time = time.time()
     # [P1-9] 同步記錄到 IP 限流器（無 IP 時為 no-op）
     if _client_ip:
         _rl.record(_client_ip)
@@ -301,12 +305,12 @@ if run_btn:
                 st.stop()
 
         # 儲存至 session_state，供重渲染時使用
-        st.session_state["last_multi_results"] = multi_results
-        st.session_state["last_multi_companies"] = list(selected_companies)
-        st.session_state["last_multi_topic"] = topic
-        st.session_state["last_multi_quarters"] = quarters
-        st.session_state["last_multi_custom_query"] = custom_query.strip()
-        st.session_state["last_mode"] = "multi"
+        ui.multi_results = multi_results
+        ui.multi_companies = list(selected_companies)
+        ui.multi_topic = topic
+        ui.multi_quarters = quarters
+        ui.multi_custom_query = custom_query.strip()
+        ui.mode = "multi"
 
     # ══════════════════════════════════════════════════════════════════════
     # 分支 B：單公司模式
@@ -405,30 +409,30 @@ if run_btn:
             st.stop()
 
         # 儲存至 session_state，供重渲染時使用
-        st.session_state["last_result"] = result
-        st.session_state["last_meta"] = {
+        ui.result = result
+        ui.meta = {
             "company": company,
             "topic": topic,
             "quarters": quarters,
             "custom_query": custom_query.strip(),
         }
-        st.session_state["last_mode"] = "single"
+        ui.mode = "single"
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 顯示結果（從 session_state 讀取，每次重渲染都能保留）
+# 顯示結果（從 UIState 讀取，每次重渲染都能保留）
 # ══════════════════════════════════════════════════════════════════════════════
-last_mode = st.session_state.get("last_mode")
+last_mode = ui.mode
 
 # ── 多公司比較結果 ─────────────────────────────────────────────────────────
 if last_mode == "multi":
     from src.core.comparison import build_comparison_table, synthesize_diff
     from src.ui.chart import build_stance_series, render_trend_chart, chart_to_scrollable_html
 
-    multi_results     = st.session_state["last_multi_results"]
-    _companies        = st.session_state["last_multi_companies"]
-    _topic            = st.session_state["last_multi_topic"]
-    _m_quarters       = st.session_state.get("last_multi_quarters", [])
-    _m_custom_query   = st.session_state.get("last_multi_custom_query", "")
+    multi_results     = ui.multi_results
+    _companies        = ui.multi_companies
+    _topic            = ui.multi_topic
+    _m_quarters       = ui.multi_quarters
+    _m_custom_query   = ui.multi_custom_query
 
     st.success("✅ 分析完成")
     st.divider()
@@ -498,9 +502,11 @@ if last_mode == "multi":
         def _compare_trend_fragment():
             """Fragment：只重跑此區塊，避免 radio 點擊重置 tab 選擇。"""
             import streamlit.components.v1 as components
-            _mr = st.session_state.get("last_multi_results", {})
-            _cs = st.session_state.get("last_multi_companies", [])
-            _tp = st.session_state.get("last_multi_topic", "")
+            # 重新從 UIState 取（fragment 重跑時取同一實例）
+            _ui = UIState.get()
+            _mr = _ui.multi_results or {}
+            _cs = _ui.multi_companies
+            _tp = _ui.multi_topic
             s_map = {
                 c: build_stance_series(_mr.get(c, {}).get("contradictions", []))
                 for c in _cs
@@ -583,9 +589,9 @@ if last_mode == "multi":
     # ── PDF 快取：只在結果改變時重新生成，避免每次重渲染都重算 ──────────────
     # [b] 納入 quarters / custom_query，換查詢維度後強制重建 PDF
     _pdf_cache_key = f"multi_pdf_{cache_key('_'.join(_companies), _topic, _m_quarters, _m_custom_query)}"
-    if st.session_state.get("_pdf_cache_key") != _pdf_cache_key:
-        st.session_state["_multi_pdf_bytes"] = None
-        st.session_state["_pdf_cache_key"] = _pdf_cache_key
+    if ui.pdf_cache_key != _pdf_cache_key:
+        ui.multi_pdf_bytes = None
+        ui.pdf_cache_key = _pdf_cache_key
 
     dl_col1, dl_col2 = st.columns(2)
     with dl_col1:
@@ -598,18 +604,18 @@ if last_mode == "multi":
             use_container_width=True,
         )
     with dl_col2:
-        if st.session_state.get("_multi_pdf_bytes") is None:
+        if ui.multi_pdf_bytes is None:
             with st.spinner("生成 PDF（首次需數秒）..."):
                 try:
                     _exp_summary = synthesize_diff(_exp_table, _topic, _companies) if _exp_table else ""
                 except Exception:
                     _exp_summary = ""
-                st.session_state["_multi_pdf_bytes"] = to_pdf_compare(
+                ui.multi_pdf_bytes = to_pdf_compare(
                     multi_results, _exp_table, _exp_summary, _companies, _topic
                 )
         st.download_button(
             label="⬇️ 下載比較報告 PDF",
-            data=st.session_state["_multi_pdf_bytes"],
+            data=ui.multi_pdf_bytes,
             file_name=f"{_fname_base}.pdf",
             mime="application/pdf",
             use_container_width=True,
@@ -617,8 +623,8 @@ if last_mode == "multi":
 
 # ── 單公司結果 ─────────────────────────────────────────────────────────────
 elif last_mode == "single":
-    result        = st.session_state["last_result"]
-    _meta         = st.session_state["last_meta"]
+    result        = ui.result
+    _meta         = ui.meta or {}
     _company      = _meta["company"]
     _topic        = _meta["topic"]
     _s_quarters   = _meta.get("quarters", [])
@@ -850,8 +856,10 @@ elif last_mode == "single":
             """Fragment：只重跑此區塊，避免 radio 點擊重置 tab 選擇。"""
             import streamlit.components.v1 as components
             from src.ui.chart import build_stance_series, render_trend_chart, chart_to_scrollable_html
-            _res  = st.session_state.get("last_result", {})
-            _meta = st.session_state.get("last_meta", {})
+            # 重新從 UIState 取（fragment 重跑時取同一實例）
+            _ui   = UIState.get()
+            _res  = _ui.result or {}
+            _meta = _ui.meta or {}
             _c    = _meta.get("company", "")
             _t    = _meta.get("topic", "")
             _cont = _res.get("contradictions", [])
@@ -1014,9 +1022,9 @@ elif last_mode == "single":
     # ── PDF 快取：只在結果改變時重新生成，避免每次重渲染都重算 ──────────────
     # [b] 納入 quarters / custom_query，換查詢維度後強制重建 PDF
     _pdf_cache_key = f"single_pdf_{cache_key(_company, _topic, _s_quarters, _s_custom_query)}"
-    if st.session_state.get("_pdf_cache_key") != _pdf_cache_key:
-        st.session_state["_single_pdf_bytes"] = None
-        st.session_state["_pdf_cache_key"] = _pdf_cache_key
+    if ui.pdf_cache_key != _pdf_cache_key:
+        ui.single_pdf_bytes = None
+        ui.pdf_cache_key = _pdf_cache_key
 
     dl_col1, dl_col2 = st.columns(2)
     with dl_col1:
@@ -1029,12 +1037,12 @@ elif last_mode == "single":
             use_container_width=True,
         )
     with dl_col2:
-        if st.session_state.get("_single_pdf_bytes") is None:
+        if ui.single_pdf_bytes is None:
             with st.spinner("生成 PDF（首次需數秒）..."):
-                st.session_state["_single_pdf_bytes"] = to_pdf_single(result, _company, _topic)
+                ui.single_pdf_bytes = to_pdf_single(result, _company, _topic)
         st.download_button(
             label="⬇️ 下載完整報告 PDF",
-            data=st.session_state["_single_pdf_bytes"],
+            data=ui.single_pdf_bytes,
             file_name=f"{_fname_base}.pdf",
             mime="application/pdf",
             use_container_width=True,
