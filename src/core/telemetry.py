@@ -27,11 +27,15 @@ from typing import Optional
 # [b] 2026-05-08 修正：先前用 `gpt-5o` / `gemini-3.0-flash` 是錯誤模型名（API 回 404），
 #     已校正成 `gpt-5` / `gpt-5-mini` / `gemini-2.5-flash`。
 #     舊鍵保留無害（缺項會被忽略），但若 BACKEND_MODELS 仍意外吐回舊名也不會匹配。
+#
+# [b] gpt-5 / gpt-5-mini 價格為早期公告之估算值；OpenAI 正式上架後若調整需回頭校正。
+#     估算偏差會直接放大到 telemetry 的 cost 欄位 → cost guard 觸發點 / sidebar 數字
+#     都會跟著失真。校正方法：對照 https://openai.com/api/pricing/ 的當期單價。
 _PRICING: dict[tuple[str, str], tuple[float, float]] = {
     # (backend, model): (input_per_1m_usd, output_per_1m_usd)
     # ── 現役主力（2026-05 校正後）──
-    ("openai", "gpt-5"):                    (5.00, 15.00),
-    ("openai", "gpt-5-mini"):               (0.25,  1.25),
+    ("openai", "gpt-5"):                    (5.00, 15.00),   # estimated, verify when stable
+    ("openai", "gpt-5-mini"):               (0.25,  1.25),   # estimated, verify when stable
     ("openai", "gpt-4.1"):                  (2.00,  8.00),
     ("openai", "gpt-4.1-mini"):             (0.40,  1.60),
     ("openai", "gpt-4o"):                   (2.50, 10.00),
