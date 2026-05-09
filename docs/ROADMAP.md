@@ -123,6 +123,17 @@ LangGraph 原生支援 `SqliteSaver` checkpoint，可從上次成功的節點 re
 
 **沒有實際痛點時做這個就是 over-engineering**。等有人吃過 3 次「重跑」苦頭再做。
 
+### 若部署到 GCP — 改用 PostgresSaver
+
+Cloud Run / GKE 容器檔案系統是 ephemeral，SqliteSaver 在 cold start 會掉資料、
+replicas 也不共用 → SqliteSaver 在 GCP 上是錯的。改用：
+
+- **PostgresSaver** (`langgraph-checkpoint-postgres`) + **Cloud SQL**（db-f1-micro
+  約 $10–20/mo）：和 SqliteSaver 同 API，只換 connection string
+- 或 **RedisSaver**（社群版本）+ **Memorystore**：快但 volatile（除非付 persistent tier）
+
+觸發點不變 — 仍是「有人實際抱怨」。GCP 改的是 *怎麼做*，不是 *要不要做*。
+
 ---
 
 ## #4 — feat: per-user rate limiting
@@ -146,6 +157,21 @@ LangGraph 原生支援 `SqliteSaver` checkpoint，可從上次成功的節點 re
 - 還沒對外公開時，這是假想敵
 - Streamlit Cloud 本身有平台級 rate limit
 - 上游（OpenAI / Gemini）的 quota 才是真正瓶頸，這層加了也不會變更穩
+
+### 若部署到 GCP — 大半工作改由 Cloud Armor 承擔
+
+GCP 上有現成的邊緣防護工具，自己寫的 in-process limiter 反而變雞肋：
+
+- **Cloud Armor**（HTTP(S) Load Balancer 前面）：per-IP rate limiting、geo blocks、
+  OWASP rule set、基本 DoS 防護。約 $5/mo + per-rule + per-million-requests。
+  **比任何自己寫的程式都好**，因為攔在 edge 層 — bad traffic 連容器都碰不到。
+- 配 Cloud Armor 後，目前的 `rate_limiter.py` IP 層可以拔掉。保留薄薄一層
+  per-session UX cooldown（按鈕 disable 10 秒）即可。
+- 多 replica 部署才需要 **Memorystore (Redis)** 後端共享 cooldown；單 replica
+  Cloud Run 用記憶體 dict 就夠（Cloud Run 有 per-instance concurrency 限制）。
+
+換句話說：上 GCP 後，這個項目的工作量從 0.5 天縮成「在 GLB 前掛 Cloud Armor 並
+寫一條 rate-limit 規則」，0.5 小時搞定。觸發點不變 — 仍是「對外公開部署」。
 
 ---
 
@@ -197,6 +223,7 @@ CI workflow 加一步：
 | 2026-05-03 | 建立此文件，初始 5 項待辦 |
 | 2026-05-09 | #5 完成（CI smoke test）；#2 完成（views/ 拆分） |
 | 2026-05-09 | #1 補登已完成（事實上由先前 P1-8 UIState 重構達成） |
+| 2026-05-09 | #3 / #4 加上 GCP 部署情境註記（PostgresSaver / Cloud Armor） |
 
 > 新增項目請：①給優先度 ②寫動工觸發條件 ③估時。
 > 沒有觸發條件的項目視為「想要但不必要」，不應佔用排程。
