@@ -13,12 +13,21 @@
 | 2026-05-03 | `046190a` | docs: comprehensive onboarding overview |
 | 2026-05-03 | `37b37d1` | test+ci: 57 tests covering v1.1 hardening + GitHub Actions |
 | 2026-05-03 | `e0cdde7` | refactor(ui): extract cache, auth, styles from app.py |
+| 2026-05-09 | `3717df6` | refactor(ui): UIState dataclass — fulfils ROADMAP #1 (session-state 集中) |
 | 2026-05-09 | `2acdc7b` | ci: Streamlit smoke test (script-health-check) — ROADMAP #5 |
 | 2026-05-09 | `d0201f8` | refactor(ui): split app.py into views/single + views/multi — ROADMAP #2 |
 
 ---
 
-## #1 — refactor(ui): extract SessionKeys constants from app.py
+## ✅ #1 — refactor(ui): extract SessionKeys constants from app.py
+
+> **已完成 2026-05-09**（commit `3717df6` — P1-8 UIState 重構）。
+> 採 dataclass 而非當初提議的 frozen dataclass / StrEnum，但達成同樣目標：
+> session-state key 集中保管，typo 變 AttributeError。後續 #2 拆分（commit
+> `d0201f8`）已 grep 驗證 `src/ui/views/*.py` 無任何 literal `st.session_state[...]`
+> 存取 — 驗收條件中前兩條（無 literal 字串、pytest 全綠 144/144）皆已滿足。
+> 第三條「手動 streamlit run 跑 single + multi」由開發者自行驗證，CI 的
+> `script-health-check` smoke test 提供 import / set_page_config 層級的保證。
 
 **優先度**：🟡 Medium
 **預估**：2-3 小時
@@ -187,6 +196,7 @@ CI workflow 加一步：
 |---|---|
 | 2026-05-03 | 建立此文件，初始 5 項待辦 |
 | 2026-05-09 | #5 完成（CI smoke test）；#2 完成（views/ 拆分） |
+| 2026-05-09 | #1 補登已完成（事實上由先前 P1-8 UIState 重構達成） |
 
 > 新增項目請：①給優先度 ②寫動工觸發條件 ③估時。
 > 沒有觸發條件的項目視為「想要但不必要」，不應佔用排程。
