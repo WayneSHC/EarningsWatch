@@ -310,12 +310,18 @@ def _save_log(log: dict) -> None:
     """
     將更新後的日誌寫回磁碟。
     每處理完一個 PDF 就立即儲存，避免批次中途崩潰遺失進度。
+
+    [b] 原子寫入：寫到 .tmp 後 os.replace 改名。POSIX rename 在同檔案系統內是
+    原子的 — 寫入半途遭 SIGKILL / 斷電 / OOM 不會留下半截 JSON。否則 _load_log
+    下次解析失敗會回傳空 dict，把所有已匯入 PDF 當作新檔重做。
     """
     PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
-    INGESTION_LOG.write_text(
+    tmp = INGESTION_LOG.with_suffix(".json.tmp")
+    tmp.write_text(
         json.dumps(log, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+    os.replace(tmp, INGESTION_LOG)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
