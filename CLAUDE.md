@@ -182,7 +182,13 @@ Multi-company mode: `run_multi_company()` in `src/core/comparison.py` uses `Thre
 ### Export (`src/ui/export.py`)
 
 - CSV: `utf-8-sig` encoding (BOM for Excel compatibility)
-- PDF: `fpdf2` + STHeiti font (`/System/Library/Fonts/STHeiti Light.ttc`). Emoji are replaced with ASCII via `_strip_emoji()` before writing because STHeiti lacks emoji glyphs.
+- PDF: `fpdf2` with a CJK-font cascade resolved at export time by `_resolve_cjk_font()` — first match wins:
+  1. **macOS** — `/System/Library/Fonts/STHeiti {Light,Medium}.ttc` (preinstalled)
+  2. **Debian/Ubuntu** — `/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc` (or `NotoSerifCJK`/`truetype` paths)
+  3. **Linux 萬用後備** — `/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc`, `/usr/share/fonts/truetype/arphic/uming.ttc`
+  - Streamlit Cloud / Linux deploy: install `fonts-noto-cjk` via `packages.txt` to satisfy step 2.
+  - If nothing matches, `to_pdf_*()` raises `RuntimeError` with a remediation message rather than emitting unreadable boxes.
+- Emoji are replaced with ASCII via `_strip_emoji()` before writing because STHeiti / Noto don't ship full emoji glyph coverage.
 
 ## Environment Variables
 

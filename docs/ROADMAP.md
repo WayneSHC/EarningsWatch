@@ -16,6 +16,7 @@
 | 2026-05-09 | `3717df6` | refactor(ui): UIState dataclass — fulfils ROADMAP #1 (session-state 集中) |
 | 2026-05-09 | `2acdc7b` | ci: Streamlit smoke test (script-health-check) — ROADMAP #5 |
 | 2026-05-09 | `d0201f8` | refactor(ui): split app.py into views/single + views/multi — ROADMAP #2 |
+| 2026-05-09 | _pending_ | chore: .env.example LangSmith vars / fix ingestion atomic write / docs PDF font — ROADMAP #8 / #9 / #10 |
 
 ---
 
@@ -265,7 +266,11 @@ CI workflow 加一步：
 
 ---
 
-## #8 — chore: .env.example 補齊 LangSmith / LLM_PAIR_WORKERS 變數
+## ✅ #8 — chore: .env.example 補齊 LangSmith / LLM_PAIR_WORKERS 變數
+
+> **已完成 2026-05-09**。`.env.example` 加上 LANGSMITH_TRACING /
+> LANGSMITH_API_KEY / LANGSMITH_PROJECT、LANGCHAIN_TRACING_V2 /
+> LANGCHAIN_API_KEY / LANGCHAIN_PROJECT（舊命名相容），以及 LLM_PAIR_WORKERS。
 
 **優先度**：🟢 Low
 **預估**：5 分鐘
@@ -288,7 +293,11 @@ CI workflow 加一步：
 
 ---
 
-## #9 — fix: 改用原子寫入避免 ingestion_log.json 損毀
+## ✅ #9 — fix: 改用原子寫入避免 ingestion_log.json 損毀
+
+> **已完成 2026-05-09**。`scripts/run_ingestion.py:_save_log()` 改成寫到
+> `.json.tmp` 後 `os.replace()` 改名 — POSIX rename 在同檔案系統內是原子的，
+> SIGKILL / 斷電 / OOM 都不會留下半截 JSON。
 
 **優先度**：🟢 Low
 **預估**：15 分鐘
@@ -322,7 +331,11 @@ def _save_log(log: dict) -> None:
 
 ---
 
-## #10 — docs: CLAUDE.md PDF 字型描述與實作對齊
+## ✅ #10 — docs: CLAUDE.md PDF 字型描述與實作對齊
+
+> **已完成 2026-05-09**。CLAUDE.md「Export」節點改寫，列出實際的 fallback
+> 順序（macOS STHeiti → Debian/Ubuntu NotoSansCJK → WQYZenHei → AR PL UMing）
+> 並說明 Streamlit Cloud / Linux 部署需在 packages.txt 裝 fonts-noto-cjk。
 
 **優先度**：🟢 Low
 **預估**：5 分鐘
@@ -366,6 +379,7 @@ STHeiti（macOS）→ NotoSansCJK（Debian/Ubuntu）→ WQYZenHei → AR PL UMin
 | 2026-05-09 | #1 補登已完成（事實上由先前 P1-8 UIState 重構達成） |
 | 2026-05-09 | #3 / #4 加上 GCP 部署情境註記（PostgresSaver / Cloud Armor） |
 | 2026-05-09 | 新增 #6–#10：chart/comparison test、.env.example、ingestion 原子寫入、PDF 字型 doc |
+| 2026-05-09 | #8 / #9 / #10 完成（quick wins：env doc、原子寫入、PDF 字型 doc） |
 
 > 新增項目請：①給優先度 ②寫動工觸發條件 ③估時。
 > 沒有觸發條件的項目視為「想要但不必要」，不應佔用排程。
