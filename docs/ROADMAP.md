@@ -13,6 +13,8 @@
 | 2026-05-03 | `046190a` | docs: comprehensive onboarding overview |
 | 2026-05-03 | `37b37d1` | test+ci: 57 tests covering v1.1 hardening + GitHub Actions |
 | 2026-05-03 | `e0cdde7` | refactor(ui): extract cache, auth, styles from app.py |
+| 2026-05-09 | `2acdc7b` | ci: Streamlit smoke test (script-health-check) — ROADMAP #5 |
+| 2026-05-09 | `d0201f8` | refactor(ui): split app.py into views/single + views/multi — ROADMAP #2 |
 
 ---
 
@@ -50,7 +52,10 @@
 
 ---
 
-## #2 — refactor(ui): split single/multi rendering into separate views
+## ✅ #2 — refactor(ui): split single/multi rendering into separate views
+
+> **已完成 2026-05-09**（commit `d0201f8`）。app.py 由 1087 行縮到 385 行；
+> single/multi 移到 `src/ui/views/`；views 不再使用 literal `st.session_state[...]`。
 
 **優先度**：🟢 Low
 **預估**：4-6 小時 + 手動 UI smoke test
@@ -135,7 +140,12 @@ LangGraph 原生支援 `SqliteSaver` checkpoint，可從上次成功的節點 re
 
 ---
 
-## #5 — test: smoke-test Streamlit launches in CI
+## ✅ #5 — test: smoke-test Streamlit launches in CI
+
+> **已完成 2026-05-09**（commit `2acdc7b`）。CI 改打 `/_stcore/script-health-check`
+> 而非單純 `/_stcore/health` — 後者只證明 server 起得來，前者真正執行 script
+> 並回 `does_script_run_without_error()`，能抓到 `set_page_config` 順序錯與
+> import-time 例外。
 
 **優先度**：🟢 Low
 **預估**：1 小時
@@ -176,6 +186,7 @@ CI workflow 加一步：
 | 日期 | 動作 |
 |---|---|
 | 2026-05-03 | 建立此文件，初始 5 項待辦 |
+| 2026-05-09 | #5 完成（CI smoke test）；#2 完成（views/ 拆分） |
 
 > 新增項目請：①給優先度 ②寫動工觸發條件 ③估時。
 > 沒有觸發條件的項目視為「想要但不必要」，不應佔用排程。
