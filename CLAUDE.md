@@ -29,9 +29,10 @@ python src/agent/graph.py            # compiles and prints graph structure
 # Syntax check a file
 source venv/bin/activate && python -m py_compile src/ui/app.py
 
-# Start Qdrant alone (Docker)
-docker start qdrant 2>/dev/null || docker run -d --name qdrant \
-  -p 6333:6333 -v $(pwd)/qdrant_storage:/qdrant/storage qdrant/qdrant
+# Start Qdrant alone (via docker-compose; idempotent)
+docker compose up -d qdrant
+docker compose down              # stop and remove (data persists in qdrant_storage/)
+docker compose logs -f qdrant    # tail Qdrant logs
 ```
 
 Tests live in `tests/`:

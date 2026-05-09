@@ -13,19 +13,16 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-# ── 1. 啟動 Qdrant（背景 Docker，僅綁定 localhost）──────────────────────────
-# [f] -p 127.0.0.1:6333:6333：Qdrant 只對本機開放，外部無法直接存取 admin API
+# ── 1. 啟動 Qdrant（透過 docker-compose，宣告式服務定義）─────────────────────
+# [f] 安全姿態（127.0.0.1 綁定、volume mount）皆移到 docker-compose.yml；
+#     此處只負責呼叫。`docker compose up -d` 是 idempotent —
+#     既有容器繼續用，沒容器才建立。
 echo "🐳 啟動 Qdrant..."
-if docker start qdrant 2>/dev/null; then
-    echo "   （使用既有容器）"
-else
-    echo "   （建立新容器，Qdrant 僅綁定 127.0.0.1）"
-    docker run -d --name qdrant \
-        --restart unless-stopped \
-        -p 127.0.0.1:6333:6333 \
-        -v "$(pwd)/qdrant_storage:/qdrant/storage" \
-        qdrant/qdrant
+if ! docker compose version >/dev/null 2>&1; then
+    echo "❌ 找不到 docker compose。請更新 Docker（v20.10+ 內建 compose v2）。"
+    exit 1
 fi
+docker compose up -d qdrant
 
 # ── 2. 等待 Qdrant 就緒（最多 30 秒）───────────────────────────────────────
 echo "⏳ 等待 Qdrant 就緒..."
