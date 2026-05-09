@@ -150,7 +150,17 @@ with st.sidebar:
         company = st.selectbox("選擇公司", COMPANIES, index=0)
         selected_companies = [company]
 
-    topic = st.selectbox("分析主題", TOPICS, index=0)
+    # [P2] 主題改為可選：預設「自動推導」讓 intent_classifier 從問題語意提煉，
+    #      使用者也可繼續從下拉固定主題。教學回饋：每家公司關注的主題不同，
+    #      固定 6 項清單無法 generalize。
+    _TOPIC_AUTO = "（自動推導）"
+    topic_choice = st.selectbox(
+        "分析主題",
+        [_TOPIC_AUTO] + TOPICS,
+        index=0,
+        help="預設讓 Agent 從你的問題自動推導主題；想固定就從清單選擇",
+    )
+    topic = "" if topic_choice == _TOPIC_AUTO else topic_choice
     available_quarters = get_available_quarters()
     quarter_selection = st.multiselect(
         f"季度範圍（留空 = 全部，共 {len(available_quarters)} 季）",
@@ -246,7 +256,8 @@ with col_btn:
     )
 with col_info:
     companies_label = " + ".join(selected_companies) if compare_mode else company
-    st.info(f"目標：**{companies_label}** ／ 主題：**{topic}** ／ 季度：{'全部' if not quarters else ', '.join(quarters)}")
+    _topic_label = topic if topic else "由問題自動推導"
+    st.info(f"目標：**{companies_label}** ／ 主題：**{_topic_label}** ／ 季度：{'全部' if not quarters else ', '.join(quarters)}")
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 執行 Agent（只在按下按鈕時執行，結果存入 session_state）
@@ -270,8 +281,18 @@ if run_btn:
     # 白名單驗證：即使 Streamlit widget 被繞過，也確保值合法
     # （防禦 session state 竄改 / 自動化腳本直接 POST）
     _invalid_company = any(c not in COMPANIES for c in selected_companies)
-    if _invalid_company or topic not in TOPICS:
+    # [f] 主題：空字串（自動推導模式）或在白名單內 → 兩者皆視為合法
+    _invalid_topic = bool(topic) and topic not in TOPICS
+    if _invalid_company or _invalid_topic:
         st.error("❌ 非法參數：公司或主題不在允許清單內，請重新選擇")
+        st.stop()
+    # [P2] 多公司比較需要明確主題（共享主題才能比較）；自動推導目前僅單公司支援
+    if compare_mode and not topic:
+        st.error("⚠️ 多公司比較模式請從主題清單選定一項（自動推導目前僅單公司模式可用）")
+        st.stop()
+    # [P2] 單公司：主題與自訂問題至少要有一個（否則 default query 會產生 "在「」方面…" 破碎字串）
+    if not compare_mode and not topic and not custom_query.strip():
+        st.error("⚠️ 請填寫自訂問題，或從主題清單選定一項")
         st.stop()
     # [f] 季度白名單：只允許 Qdrant 實際存在的季度值，格式 YYYYQN（4碼年 + Q + 1碼季）
     #     防止使用者傳入非預期字串進入 Qdrant filter
@@ -408,13 +429,16 @@ if run_btn:
             st.error("無結果可顯示")
             st.stop()
 
-        # 儲存至 session_state，供重渲染時使用
+        # [P2] 若 UI 沒指定 topic（自動推導模式），用 Agent 萃取後的主題覆寫；
+        #      auto_detected 旗標供 UI 顯示「🎯 已自動推導主題」橫幅
+        _final_topic = topic or (result.get("topic") if isinstance(result, dict) else "") or ""
         ui.result = result
         ui.meta = {
             "company": company,
-            "topic": topic,
+            "topic": _final_topic,
             "quarters": quarters,
             "custom_query": custom_query.strip(),
+            "auto_detected_topic": not topic,
         }
         ui.mode = "single"
 
@@ -629,6 +653,13 @@ elif last_mode == "single":
     _topic        = _meta["topic"]
     _s_quarters   = _meta.get("quarters", [])
     _s_custom_query = _meta.get("custom_query", "")
+
+    # [P2] 自動推導主題模式：顯示推導結果，讓使用者驗證並可重選
+    if _meta.get("auto_detected_topic") and _topic:
+        st.info(
+            f"🎯 已自動推導主題：**{_topic}** "
+            f"（如不正確，請在側欄改選主題後重新偵查）"
+        )
 
     st.divider()
 
