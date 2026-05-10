@@ -20,7 +20,7 @@ from src.agent.state import AgentState
 from src.agent.tools import decide_tools, search_news, get_stock_price
 from src.core.retriever import retrieve, get_company_quarters, retrieve_coverage
 from src.core.contradiction import batch_detect, detect_promises, _extract_json
-from src.core.llm_client import chat as llm_chat
+from src.core.llm_client import chat as llm_chat, friendly_error_message
 from src.core import telemetry
 
 
@@ -749,7 +749,16 @@ def report_generator(state: AgentState) -> dict:
                 sections.append("")
                 log.append("  ✅ 直接回答段落生成完成")
             except Exception as e:
-                log.append(f"  ⚠ 直接回答生成失敗：{e}")
+                # [f] 只顯示乾淨摘要，原始 SDK 例外（含 HTTP body / trace-id）只進 stdout
+                _msg = friendly_error_message(e)
+                print(f"[Nodes] direct_answer LLM 失敗: {type(e).__name__}: {str(e)[:200]}")
+                log.append(f"  ⚠ 直接回答生成失敗：{_msg}")
+                sections.append("## 直接回答")
+                sections.append(
+                    f"> ⚠️ 暫時無法生成直接回答（{_msg}）。"
+                    "下方仍提供跨季比對與承諾追蹤分析，可作為參考。"
+                )
+                sections.append("")
 
     # 矛盾摘要
     has_contradiction = any(

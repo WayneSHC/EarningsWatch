@@ -246,9 +246,11 @@ if run_btn:
                 )
             except Exception as e:
                 # [f] 不對使用者顯示 str(e)，避免洩漏 API key 片段或內部路徑
+                from src.core.llm_client import friendly_error_message
                 _etype = type(e).__name__
+                _msg = friendly_error_message(e)
                 print(f"[UI] 多公司分析失敗: {_etype}: {e}")
-                st.error(f"多公司分析失敗（{_etype}），請稍後再試或確認 API Key 設定。")
+                st.error(f"多公司分析失敗：{_msg}")
                 st.stop()
 
         # 儲存至 UIState，供重渲染時使用
@@ -343,13 +345,31 @@ if run_btn:
 
             except Exception as e:
                 # [f] 不對使用者顯示 str(e)，避免洩漏 API key 片段或內部路徑
+                from src.core.llm_client import friendly_error_message, LLMUnavailableError
                 _etype = type(e).__name__
+                _msg = friendly_error_message(e)
                 print(f"[UI] Agent 執行失敗: {_etype}: {e}")
-                st.error(f"Agent 執行失敗（{_etype}），嘗試載入 Demo 快取...")
-                st.warning("嘗試載入 Demo 快取...")
+                # LLM 全掛時用更明確的 banner，避免使用者誤以為是程式 bug
+                if isinstance(e, LLMUnavailableError):
+                    st.error(f"⚠️ {_msg}")
+                else:
+                    st.error(f"Agent 執行失敗：{_msg}")
+                st.info("正在嘗試載入 Demo 快取作為保底…")
                 result = get_cached_result(company, topic, quarters, custom_query.strip())
                 if not result:
-                    st.error("無快取資料，請確認：1) Qdrant Docker 執行中 2) API Keys 已設定 3) PDF 已匯入")
+                    # 區分兩種 cache-miss 場景：自訂問題 vs 無 demo 快取的公司
+                    if custom_query.strip():
+                        st.warning(
+                            f"⚠ 自訂問題「{custom_query.strip()[:40]}」無對應 Demo 快取。"
+                            "Demo 快取只涵蓋預設公司／主題組合；請等 LLM 配額恢復後重試，"
+                            "或改用左側選單的預設主題（不要填自訂問題）以命中快取。"
+                        )
+                    else:
+                        st.warning(
+                            f"⚠ 此公司／主題（{company} × {topic}）尚未產生 Demo 快取。"
+                            "請等 LLM 配額恢復後重試，或先以其他預設組合進行展示。"
+                        )
+                    st.caption("環境檢查：1) Qdrant 連線正常 2) 至少一個 API Key 配額未用完 3) PDF 已匯入並完成 embedding")
                     st.stop()
 
         if not result:

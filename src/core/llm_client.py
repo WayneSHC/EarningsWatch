@@ -78,6 +78,54 @@ _KEY_ENV = {
     "cohere":    "COHERE_API_KEY",
 }
 
+
+# ── [b] 自訂例外，給上層呼叫端一個明確、可分辨的「全後端不可用」訊號 ──────────
+class LLMUnavailableError(RuntimeError):
+    """
+    當所有 LLM 後端皆失敗時 chat() 改 raise 此例外。
+
+    與直接 raise 原始 SDK 例外（TooManyRequestsError 等）的差別：
+      - SDK 例外的 str(e) 通常是整段 HTTP response（含 headers / trace-id /
+        full body），會洩漏到 steps_log 裡顯示給使用者。
+      - 此例外只攜帶人類可讀的中文摘要，給 UI 直接顯示安全。
+      - root_cause 留給 logger 使用，不應顯示給使用者。
+    """
+
+    def __init__(self, friendly_message: str, root_cause: BaseException | None = None):
+        super().__init__(friendly_message)
+        self.friendly_message = friendly_message
+        self.root_cause = root_cause
+
+
+def friendly_error_message(exc: BaseException) -> str:
+    """
+    [b] 將任意 LLM 例外轉成乾淨、無 PII / 無 raw HTTP body 的中文摘要。
+
+    給 UI 的 steps_log / 報告區塊使用，避免把 SDK 噴出的整段 response
+    （含 trace-id、headers、Cohere trial-key 提示文字）原封顯示給使用者。
+    """
+    if isinstance(exc, LLMUnavailableError):
+        return exc.friendly_message
+    etype = type(exc).__name__
+    msg = str(exc)
+    msg_lower = msg.lower()
+    if any(m in msg_lower for m in ("rate limit", "rate_limit",
+                                     "too many requests", "429")):
+        return f"LLM 服務速率限制（{etype}），請稍後重試"
+    if any(m in msg_lower for m in ("quota", "exceeded", "resource_exhausted",
+                                     "insufficient_quota", "billing",
+                                     "credit", "low balance", "trial key")):
+        return f"LLM 配額已用完（{etype}）"
+    if "401" in msg or "403" in msg:
+        return f"LLM API Key 無效或權限不足（{etype}）"
+    if any(m in msg_lower for m in ("404", "not_found", "not found",
+                                     "does not exist", "model_not_found")):
+        return f"LLM 模型不存在或已下線（{etype}）"
+    if any(m in msg_lower for m in ("503", "service unavailable", "overloaded",
+                                     "timeout", "timed out")):
+        return f"LLM 服務暫時不可用（{etype}）"
+    return f"LLM 呼叫失敗（{etype}）"
+
 # [b] 主備援順序：openai → gemini → cohere
 _AUTO_DETECT_ORDER = ["openai", "gemini", "cohere"]
 
@@ -398,15 +446,20 @@ def chat(prompt: str, max_tokens: int = 600, mode: str = "demo") -> str:
                 # 其他非暫時性錯誤 → 直接 raise
                 raise
 
-    # 所有候選都失敗 → 給使用者明確訊息
-    final_msg = (
-        "❌ 所有 LLM 後端都失敗（OpenAI / Gemini / Cohere 皆無法回應）。\n"
-        "可能原因：所有 API Key 配額同時用完、網路中斷、或服務全面異常。\n"
-        f"最後一次錯誤：{type(last_err).__name__}: {str(last_err)[:200]}"
-        if last_err else "[LLM] 所有後端都失敗"
+    # 所有候選都失敗 → 給 stdout 印詳細錯誤（給 dev 看），對 caller raise 簡潔例外（給 UI 看）
+    if last_err is not None:
+        log_msg = (
+            "❌ 所有 LLM 後端都失敗（OpenAI / Gemini / Cohere 皆無法回應）。\n"
+            "可能原因：所有 API Key 配額同時用完、網路中斷、或服務全面異常。\n"
+            f"最後一次錯誤：{type(last_err).__name__}: {str(last_err)[:200]}"
+        )
+    else:
+        log_msg = "[LLM] 所有後端都失敗"
+    print(log_msg)
+    raise LLMUnavailableError(
+        "所有 LLM 後端皆暫時不可用（配額用盡 / 速率限制 / 服務異常），請稍後再試",
+        root_cause=last_err,
     )
-    print(final_msg)
-    raise last_err if last_err else RuntimeError(final_msg)
 
 
 def available_backends() -> list[str]:
