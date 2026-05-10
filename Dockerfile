@@ -1,0 +1,80 @@
+# EarningsWatch — Cloud Run image
+#
+# 設計重點：
+# 1. 多階段建置：builder 安裝編譯依賴與 pip 套件，runner 只帶執行期所需檔案 → 縮 image 體積
+# 2. 烤入 sentence-transformers 模型（420MB）：避免 Cloud Run 每次 cold start 重新下載
+# 3. fonts-noto-cjk：CJK PDF 匯出需要（packages.txt 在 Streamlit Cloud 用，這裡顯式裝）
+# 4. 走 0.0.0.0 + $PORT：Cloud Run 會注入 PORT 環境變數，預設 8080
+# 5. non-root user：降低權限
+
+# ── Stage 1: builder ─────────────────────────────────────────────────────────
+FROM python:3.11-slim AS builder
+
+ENV PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+WORKDIR /build
+
+# 編譯期依賴（torch / sentence-transformers wheel 已預編，但部分 transitive 需要 gcc）
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+
+# 裝到固定 prefix，方便 stage 2 整包搬走
+RUN pip install --prefix=/install -r requirements.txt
+
+# 預先下載 embedding 模型到固定路徑，烤進 image
+# HF_HOME 設好後，runtime SentenceTransformer("paraphrase-multilingual-mpnet-base-v2") 會直接命中快取
+ENV HF_HOME=/opt/hf_cache
+RUN PYTHONPATH=/install/lib/python3.11/site-packages \
+    python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('paraphrase-multilingual-mpnet-base-v2')"
+
+
+# ── Stage 2: runner ──────────────────────────────────────────────────────────
+FROM python:3.11-slim AS runner
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    HF_HOME=/opt/hf_cache \
+    HF_HUB_OFFLINE=1 \
+    TRANSFORMERS_OFFLINE=1 \
+    PORT=8080
+
+# 執行期系統依賴：
+#   fonts-noto-cjk → fpdf2 CJK PDF 匯出
+#   libgomp1       → torch / numpy 用到的 OpenMP runtime
+#   curl           → 容器內 healthcheck 偵錯（選用）
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        fonts-noto-cjk \
+        libgomp1 \
+        curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# 從 builder 搬 site-packages 與烤好的模型
+COPY --from=builder /install /usr/local
+COPY --from=builder /opt/hf_cache /opt/hf_cache
+
+# 建立 non-root user
+RUN useradd -m -u 1000 app
+WORKDIR /app
+
+# 只 COPY 真正需要的執行期檔案（其餘由 .dockerignore 排除）
+COPY --chown=app:app src/ ./src/
+COPY --chown=app:app scripts/ ./scripts/
+COPY --chown=app:app .streamlit/ ./.streamlit/
+COPY --chown=app:app cache/ ./cache/
+
+USER app
+
+EXPOSE 8080
+
+# Cloud Run 會打 $PORT；Streamlit 必須綁 0.0.0.0
+# --server.address 覆蓋 .streamlit/config.toml 中的 127.0.0.1
+#
+# 用 sh -c 包起來才能展開 ${PORT}（Cloud Run 注入），同時保留 JSON exec form：
+# JSON form 讓 Streamlit 直接收到 Cloud Run 發的 SIGTERM，可以走 graceful shutdown
+# （shell form 會把 sh 設成 PID 1，吃掉 SIGTERM）
+CMD ["sh", "-c", "exec streamlit run src/ui/app.py --server.port=${PORT} --server.address=0.0.0.0 --server.headless=true --browser.gatherUsageStats=false"]

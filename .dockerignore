@@ -1,0 +1,45 @@
+# 機密
+.env
+*.env.local
+.streamlit/secrets.toml
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+
+# 大型本機資料（Cloud 部署改用 Qdrant Cloud）
+data/
+qdrant_storage/
+
+# 測試與快取輸出
+tests/benchmark_results*.json
+tests/benchmark_report*.json
+tests/benchmark_smoke*.json
+.pytest_cache/
+
+# 開發工具
+.vscode/
+.idea/
+.git/
+.github/
+.devcontainer/
+.claude/
+*.swp
+.DS_Store
+Thumbs.db
+
+# 文件（image 不需要）
+docs/
+*.md
+!cache/.gitkeep
+
+# Docker 自身與本機腳本
+docker-compose.yml
+start.sh
+
+# Skill 打包
+*.skill
