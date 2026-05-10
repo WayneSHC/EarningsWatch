@@ -182,13 +182,33 @@ class TestChatCascade:
             lc.chat("hi")
         assert attempts == ["openai"]
 
-    def test_all_backends_fail_raises_last_error(self, monkeypatch):
+    def test_all_backends_fail_raises_llm_unavailable(self, monkeypatch):
+        """
+        當所有後端皆失敗，chat() 應 raise LLMUnavailableError（仍是 RuntimeError 子類），
+        並把原始例外存到 .root_cause，避免把含 HTTP body 的 raw SDK 例外洩漏到 UI。
+        """
         def fake_dispatch(backend, prompt, model, max_tokens):
             raise RuntimeError(f"{backend} quota exceeded")
 
         monkeypatch.setattr(lc, "_dispatch", fake_dispatch)
-        with pytest.raises(RuntimeError, match="quota exceeded"):
+        with pytest.raises(lc.LLMUnavailableError) as exc_info:
             lc.chat("hi")
+
+        # 顯示給使用者的訊息必須乾淨（不含 raw 後端錯誤字串）
+        assert "quota exceeded" not in str(exc_info.value)
+        # root_cause 留給 logger 使用，必須仍是原始例外
+        assert isinstance(exc_info.value.root_cause, RuntimeError)
+        assert "quota exceeded" in str(exc_info.value.root_cause)
+
+    def test_friendly_error_message_categorizes(self):
+        """friendly_error_message 應該把常見錯誤分類為乾淨的中文摘要。"""
+        rate = lc.friendly_error_message(RuntimeError("HTTP 429 too many requests"))
+        assert "速率限制" in rate
+        quota = lc.friendly_error_message(RuntimeError("You are using a Trial key"))
+        assert "配額" in quota
+        # LLMUnavailableError 應該回傳自己的 friendly_message，不再二次分類
+        wrapped = lc.LLMUnavailableError("custom clean msg", root_cause=None)
+        assert lc.friendly_error_message(wrapped) == "custom clean msg"
 
 
 # ──────────────────────────────────────────────────────────────────────────

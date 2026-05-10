@@ -14,6 +14,12 @@ enableXsrfProtection = true
 # 不允許跨 origin 存取（對外部署可依需求調整）
 enableCORS = false
 
+# [c] 關閉 file watcher 以避免 transformers 的 lazy modules
+# （image_processing_*）在 introspect 時噴出大量
+# `ModuleNotFoundError: No module named 'torchvision'` 雜訊。
+# 我們在 Streamlit Cloud 部署時不需要 hot-reload，關掉同時降低 CPU 用量。
+fileWatcherType = "none"
+
 [browser]
 # 不回傳使用統計到 Streamlit 伺服器
 gatherUsageStats = false

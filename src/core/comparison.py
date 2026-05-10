@@ -54,14 +54,16 @@ def run_multi_company(
                 results[company] = result
             except Exception as e:
                 # [f] 只記錄 type.__name__，避免完整 str(e) 含 API key 片段洩漏到 UI
+                from src.core.llm_client import friendly_error_message
                 _etype = type(e).__name__
+                _msg = friendly_error_message(e)
                 print(f"[Comparison] {company} 分析失敗: {_etype}: {str(e)[:120]}")
                 results[company] = {
                     "error": _etype,
                     "contradictions": [],
                     "promises": [],
                     "confidence": 0.0,
-                    "final_report": f"⚠ {company} 分析失敗：{_etype}",
+                    "final_report": f"⚠ {company} 分析失敗：{_msg}",
                 }
     return results
 
