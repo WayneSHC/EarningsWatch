@@ -56,9 +56,17 @@ def intent_classifier(state: AgentState) -> dict:
         #      free-form 不會破壞 pipeline；改善處：UI 不必強迫使用者從固定下拉選擇。
         resp = _llm(f"""從以下問題萃取資訊，只回傳 JSON：
 問題：{state['query']}
+
+主題萃取規則（重要）：
+- 問題中若出現英文縮寫或技術名詞（例如 CoWoS / CoPoS / HBM / FinFET / N2），
+  主題必須原樣沿用該縮寫，可調整大小寫成業界標準寫法
+- 嚴禁把使用者輸入的縮寫替換成「不同字母組成的相似詞」
+  （例：不可把 CoPoS 改成 CoWoS；不可把 HBM4 改成 HBM3）
+- 主題長度：2~8 字短語，可純中文 / 純英文縮寫 / 中英混合
+
 {{
   "company": "公司名（台積電/聯發科/鴻海/台達電）",
-  "topic": "主題：依問題語意提煉成 2-8 字短語，例：AI需求 / 毛利率 / CoWoS 產能 / 庫存調整 / 任何具體議題",
+  "topic": "依問題語意提煉的主題短語，例：AI需求 / 毛利率 / 資本支出 / 庫存調整",
   "quarters": ["2024Q1", "2024Q3"] 或 [] 代表全部
 }}""", max_tokens=200)
         try:

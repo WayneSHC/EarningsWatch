@@ -329,25 +329,31 @@ def _format_quota_message(backend: str, msg: str) -> str:
     """
     [b] 將 quota / 認證錯誤翻譯成使用者看得懂的提示。
 
-    順序敏感警告：分支由具體 → 一般。
-      1. rate limit / 429 → 短時間請求過多（必須先於 quota，因為「rate limit exceeded」會被 quota 的 "exceeded" 誤吃）
-      2. quota / billing → 配額用完
-      3. 401 / 403 → 認證失敗
-      4. 404 / not_found → 模型下線
-      5. 503 / overloaded → 服務不可用
-      6. 其他 → 通用降級訊息
+    分類優先級（具體 → 一般）：
+      1. 強 quota markers（quota / billing / credit / RESOURCE_EXHAUSTED） → 配額或餘額用盡
+      2. 強 rate-limit markers（rate limit / rate_limit）       → 短時間請求過多
+      3. 裸 429 / "too many requests"（無 quota 上下文）         → 預設視為速率限制
+      4. 401 / 403 → 認證失敗
+      5. 404 / not_found → 模型下線
+      6. 503 / overloaded → 服務不可用
+      7. 其他 → 通用降級訊息
     若未來新增分支，「最具體的條件放最上面」，避免被前面 catch-all 吃掉。
     """
     label = _BACKEND_LABEL.get(backend, backend)
     msg_lower = msg.lower()
-    # [b] rate-limit 必須在 quota 之前判斷：「rate limit exceeded」含 "exceeded"
-    if any(m in msg_lower for m in ("rate limit", "rate_limit",
-                                     "too many requests", "429")):
-        return f"⚠️  {label} 觸發速率限制（短時間內請求過多），切換下一個後端…"
-    if any(m in msg_lower for m in ("quota", "exceeded", "resource_exhausted",
-                                     "insufficient_quota", "billing",
-                                     "credit", "low balance")):
+    # [b] 強 quota markers 優先：含「quota / billing / credit / RESOURCE_EXHAUSTED」
+    #     幾乎一定是配額或餘額問題（OpenAI quota 用盡的 message 也是 429，
+    #     舊版優先比對 429 → 把 quota 用盡誤判成速率限制 → 使用者以為「等一下就好」）。
+    if any(m in msg_lower for m in ("quota", "billing", "credit",
+                                     "insufficient_quota", "resource_exhausted",
+                                     "low balance")):
         return f"⚠️  {label} 今日 token / 配額已用完，自動切換下一個後端…"
+    # [b] 強 rate-limit markers
+    if any(m in msg_lower for m in ("rate limit", "rate_limit")):
+        return f"⚠️  {label} 觸發速率限制（短時間內請求過多），切換下一個後端…"
+    # [b] 裸 429 / too many requests：無 quota 上下文，預設視為速率限制
+    if "too many requests" in msg_lower or "429" in msg:
+        return f"⚠️  {label} 觸發速率限制（短時間內請求過多），切換下一個後端…"
     if "401" in msg or "403" in msg:
         return f"⚠️  {label} API Key 失效或權限不足，切換下一個後端…"
     if any(m in msg_lower for m in ("404", "not_found", "not found",

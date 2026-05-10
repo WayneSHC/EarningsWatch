@@ -294,6 +294,10 @@ def test_quota_marker_recognized(monkeypatch, err_msg):
     ("insufficient_quota",                "今日 token / 配額已用完"),
     ("Your credit balance is too low",    "今日 token / 配額已用完"),
     ("billing required",                  "今日 token / 配額已用完"),
+    # OpenAI real-world quota-exhausted message: 429 + quota + billing 同時出現
+    # 必須優先匹配 quota 而非 429，否則使用者會誤以為「等一下就好」
+    ("Error code: 429 - You exceeded your current quota, please check your "
+     "plan and billing details.",         "今日 token / 配額已用完"),
     # Rate limit
     ("429 Too Many Requests",             "速率限制"),
     ("rate limit exceeded",               "速率限制"),
