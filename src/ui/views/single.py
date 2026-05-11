@@ -1,7 +1,7 @@
 """
 src/ui/views/single.py
 
-單公司模式的渲染：信心度指標、Agentic RAG 工具卡片、矛盾 / 承諾 / 趨勢 / 分析過程
+單公司模式的渲染：信心度指標、RAG Agent 工具卡片、矛盾 / 承諾 / 趨勢 / 分析過程
 四個 tab、匯出按鈕。
 
 由 app.py 在 ui.mode == "single" 時呼叫一次 render_single_company_result(ui)。
@@ -74,7 +74,7 @@ def render_single_company_result(ui: UIState) -> None:
 
     st.divider()
 
-    # ── Agentic RAG 行為展示 ──────────────────────────────────────────────────
+    # ── RAG Agent 行為展示 ──────────────────────────────────────────────────
     _iteration    = result.get("iteration", 1)
     _tool_plan    = result.get("tool_plan", ["qdrant"])
     _news_ctx     = result.get("news_context", [])
@@ -199,7 +199,7 @@ def render_single_company_result(ui: UIState) -> None:
             irrelevant_count = len(contradictions) - len(relevant)
 
             if not relevant:
-                st.info("所有比對組均判定為主題無關，請嘗試更換分析主題或縮小季度範圍。")
+                st.info("所有比對組均判定為主題無關，請嘗試更換建議主題或縮小季度範圍。")
             else:
                 if irrelevant_count > 0:
                     st.caption(f"已隱藏 {irrelevant_count} 組無效比對（主題無關 / 表格頁 / boilerplate）")
@@ -332,7 +332,7 @@ def render_single_company_result(ui: UIState) -> None:
     with tab_agent:
         st.markdown("#### 🤖 Agent 分析過程")
         st.caption(
-            "此頁面揭示 EarningsWatch Agentic RAG 的內部運作："
+            "此頁面揭示 EarningsWatch RAG Agent 的內部運作："
             "Query 拆解 → 工具路由 → 並行檢索 → 矛盾偵測 → Self-Reflection → 報告生成"
         )
 
@@ -398,7 +398,7 @@ def render_single_company_result(ui: UIState) -> None:
 
         # ── Item 7：Agent 架構圖 ──────────────────────────────────────
         st.divider()
-        st.markdown("##### 🗺️ Agentic RAG 架構")
+        st.markdown("##### 🗺️ RAG Agent 架構")
         st.markdown("""
 <div style="background:#f8fafc;border-radius:8px;padding:14px 18px;font-family:monospace;font-size:13px;line-height:2">
 <strong>查詢輸入</strong><br>

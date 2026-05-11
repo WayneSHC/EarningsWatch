@@ -55,7 +55,7 @@ require_password()
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.title("🕵️ EarningsWatch")
-    st.caption("法說會 Agentic RAG 一致性審計平台")
+    st.caption("法說會 RAG Agent 一致性審計平台")
     st.divider()
 
     # 多公司比較模式切換
@@ -82,7 +82,7 @@ with st.sidebar:
     #      固定 6 項清單無法 generalize。
     _TOPIC_AUTO = "（自動推導）"
     topic_choice = st.selectbox(
-        "分析主題",
+        "建議主題",
         [_TOPIC_AUTO] + TOPICS,
         index=0,
         help="預設讓 Agent 從你的問題自動推導主題；想固定就從清單選擇",
@@ -152,7 +152,7 @@ with st.sidebar:
 
 # ── 主區域 ───────────────────────────────────────────────────────────────────
 st.title("🕵️ EarningsWatch")
-st.markdown("**法說會 Agentic RAG 一致性審計平台** — 追蹤管理層跨季發言，找矛盾・追承諾・抓話術")
+st.markdown("**法說會 RAG Agent 一致性審計平台** — 追蹤管理層跨季發言，找矛盾・追承諾・抓話術")
 st.divider()
 
 # ── [f] Rate Limiting：雙層防護 ──────────────────────────────────────────────
