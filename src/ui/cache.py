@@ -90,7 +90,7 @@ def save_to_cache(
         "promises":       result.get("promises", []),
         "steps_log":      result.get("steps_log", []),
         "confidence":     result.get("confidence", 0.0),
-        # Agentic RAG 展示欄位
+        # RAG Agent 展示欄位
         "iteration":      result.get("iteration", 1),
         "tool_plan":      result.get("tool_plan", ["qdrant"]),
         "news_context":   result.get("news_context", []),
