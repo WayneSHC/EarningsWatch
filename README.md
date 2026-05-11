@@ -1,6 +1,6 @@
 # 🕵️ EarningsWatch
 
-> **法說會 Agentic RAG 一致性審計平台**
+> **法說會 RAG Agent 一致性審計平台**
 > 追蹤管理層跨季發言 · 找矛盾 · 追承諾 · 抓話術
 
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue)](https://www.python.org/)
@@ -12,7 +12,7 @@
 
 ## 📌 專案簡介
 
-EarningsWatch 透過 **7 節點 LangGraph Agentic RAG** 自動分析上市公司法說會逐字稿，解決傳統閱讀時難以跨季比對的痛點：
+EarningsWatch 透過 **7 節點 LangGraph RAG Agent** 自動分析上市公司法說會逐字稿，解決傳統閱讀時難以跨季比對的痛點：
 
 - **矛盾偵測**：找出管理層前後說法不一致之處
 - **承諾追蹤**：記錄前瞻指引，下季自動驗收是否兌現
