@@ -127,20 +127,20 @@ def get_stock_price(company: str, period: str = "1y") -> dict:
 #   LLM 依據問題語意決定要呼叫哪些工具，取代純關鍵字匹配。
 TOOL_SPECS = [
     {
-        "name": "qdrant",
-        "description": "公司法說會逐字稿向量+BM25 檢索（核心工具，幾乎所有財報問題都需要）",
+        "name": "bigquery",
+        "description": "公司法說會逐字稿 BigQuery 向量檢索（核心工具，幾乎所有財報問題都需要）",
         "use_when": "需要查公司過去發言、財務指引、跨季比對時",
         "always_required": True,
     },
     {
         "name": "tavily",
-        "description": "即時網路新聞搜尋",
+        "description": "搜尋即時新聞、近期財報解讀、競爭對手動態。",
         "use_when": "問題涉及『最新』『近期』『今年』『市場動態』『產業趨勢』『競爭對手』時",
         "always_required": False,
     },
     {
         "name": "yfinance",
-        "description": "股價、市值、52 週高低、漲跌幅",
+        "description": "獲取最新股價表現與本益比，作為市場反應的佐證。",
         "use_when": "問題明確涉及『股價』『市值』『漲跌』『報酬率』『投資價值』時",
         "always_required": False,
     },
@@ -149,7 +149,7 @@ TOOL_SPECS = [
 
 def decide_tools_by_keyword(query: str, topic: str) -> list[str]:
     """關鍵字匹配版本（保留作為 LLM 失敗時的降級路徑）。"""
-    tools = ["qdrant"]
+    tools = ["bigquery"]
     query_lower = query + topic
     if any(kw in query_lower for kw in _NEWS_KEYWORDS):
         tools.append("tavily")
@@ -165,7 +165,7 @@ def decide_tools(query: str, topic: str) -> list[str]:
     取代舊版純關鍵字匹配（如「最新」→ tavily）。
 
     LLM 失敗或回應格式錯誤時自動降級為 decide_tools_by_keyword。
-    qdrant 為 always_required，無論 LLM 怎麼選都會包含。
+    bigquery 為 always_required，無論 LLM 怎麼選都會包含。
     """
     # 內部 import 避免 module load 時的循環依賴（tools 不依賴 llm_client，但保險起見）
     from src.core.llm_client import chat as llm_chat
@@ -183,12 +183,12 @@ def decide_tools(query: str, topic: str) -> list[str]:
 
 只回傳 JSON（不要其他文字）：
 {{
-  "tools": ["qdrant", "tavily", ...],
+  "tools": ["bigquery", "tavily", ...],
   "reasoning": "10字以內的選擇理由"
 }}
 
 規則：
-- qdrant 一律必選（公司問題都需要查發言）
+- bigquery 一律必選（公司問題都需要查發言）
 - 只在問題真的需要時加 tavily 或 yfinance
 - 若不確定，傾向不加（避免拖慢回應）
 """

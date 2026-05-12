@@ -180,6 +180,8 @@ with col_btn:
         type="primary",
         use_container_width=True,
         disabled=cooldown_remaining > 0 or _not_enough_companies,
+        # help tooltip：懸停時顯示按鈕功能說明，降低使用者疑惑
+        help="啟動 AI Agent，對所選公司進行跨季法說會發言矛盾分析、承諾追蹤與矛盾偵測",
     )
 with col_info:
     companies_label = " + ".join(selected_companies) if compare_mode else company
@@ -221,8 +223,8 @@ if run_btn:
     if not compare_mode and not topic and not custom_query.strip():
         st.error("⚠️ 請填寫自訂問題，或從主題清單選定一項")
         st.stop()
-    # [f] 季度白名單：只允許 Qdrant 實際存在的季度值，格式 YYYYQN（4碼年 + Q + 1碼季）
-    #     防止使用者傳入非預期字串進入 Qdrant filter
+    # [f] 季度白名單：只允許 BigQuery 實際存在的季度值，格式 YYYYQN（4碼年 + Q + 1碼季）
+    #     防止使用者傳入非預期字串進入 SQL 條件
     _valid_quarters = set(available_quarters)
     _quarter_pattern = re.compile(r"^\d{4}Q[1-4]$")
     quarters = [
@@ -369,7 +371,7 @@ if run_btn:
                             f"⚠ 此公司／主題（{company} × {topic}）尚未產生 Demo 快取。"
                             "請等 LLM 配額恢復後重試，或先以其他預設組合進行展示。"
                         )
-                    st.caption("環境檢查：1) Qdrant 連線正常 2) 至少一個 API Key 配額未用完 3) PDF 已匯入並完成 embedding")
+                    st.caption("環境檢查：1) BigQuery 連線正常 2) 至少一個 API Key 配額未用完 3) PDF 已匯入並完成 embedding")
                     st.stop()
 
         if not result:

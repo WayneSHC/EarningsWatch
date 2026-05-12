@@ -95,8 +95,8 @@ def intent_classifier(state: AgentState) -> dict:
 # 節點 2：Query Decomposer
 # ══════════════════════════════════════════════════════════════════════════════
 _DEFAULT_SUB_QUERIES_TEMPLATE = [
-    {"id": "cross_quarter", "purpose": "跨季發言比對", "tool": "qdrant"},
-    {"id": "guidance", "purpose": "財務指引與承諾追蹤", "tool": "qdrant", "section_filter": "guidance"},
+    {"id": "cross_quarter", "purpose": "跨季發言比對", "tool": "bigquery"},
+    {"id": "guidance", "purpose": "財務指引與承諾追蹤", "tool": "bigquery", "section_filter": "guidance"},
     {"id": "news", "purpose": "即時新聞背景", "tool": "tavily"},
 ]
 
@@ -118,8 +118,8 @@ def query_decomposer(state: AgentState) -> dict:
     每條子查詢需指定：
       - query: 實際送進 retriever / Tavily 的查詢字串
       - purpose: 該子查詢要解決的問題（log 顯示）
-      - tool: "qdrant" 或 "tavily"
-      - section_filter: 選填，限制 Qdrant section（如 "guidance"）
+      - tool: "bigquery" 或 "tavily"
+      - section_filter: 選填，限制 BigQuery section（如 "guidance"）
     """
     company = state.get("company", "")
     topic   = state.get("topic", "")
@@ -149,14 +149,14 @@ def query_decomposer(state: AgentState) -> dict:
       "id": "唯一識別字串（英數）",
       "query": "送進向量檢索或新聞 API 的實際查詢字串（中文，10~30字）",
       "purpose": "這條子查詢的目的（10字內）",
-      "tool": "qdrant 或 tavily",
+      "tool": "bigquery 或 tavily",
       "section_filter": "guidance 或 留空字串"
     }}
   ]
 }}
 
 要求：
-- 至少包含 1 條 qdrant 子查詢做跨季比對
+- 至少包含 1 條 bigquery 子查詢做跨季比對
 - 若主題涉及財務數字（毛利率/營收/產能），加入 1 條 section_filter=\"guidance\" 的子查詢
 - 若問題涉及「最新/近期/市場」，加入 1 條 tavily 子查詢
 - query 字串要包含公司名與主題，不要太籠統
@@ -178,8 +178,8 @@ def query_decomposer(state: AgentState) -> dict:
             if not isinstance(sq, dict):
                 continue
             q_str = str(sq.get("query", "")).strip()
-            tool = str(sq.get("tool", "qdrant")).strip().lower()
-            if not q_str or tool not in ("qdrant", "tavily"):
+            tool = str(sq.get("tool", "bigquery")).strip().lower()
+            if not q_str or tool not in ("bigquery", "tavily"):
                 continue
             entry = {
                 "id": str(sq.get("id", f"sq_{len(sub_queries)}")),
@@ -224,14 +224,14 @@ def dynamic_tool_router(state: AgentState) -> dict:
 def parallel_retrieval(state: AgentState) -> dict:
     """
     依 sub_queries 真正並行執行檢索（ThreadPoolExecutor）。
-    - Qdrant 向量搜尋、Tavily 新聞、yfinance 股價三路同時發出，互不阻塞
+    - BigQuery 向量搜尋、Tavily 新聞、yfinance 股價三路同時發出，互不阻塞
     - 知識庫結果按季度分組，便於 Contradiction Detector 跨季比對
     - 各子任務獨立捕捉例外，單一失敗不影響其他查詢
     """
     log = [f"📚 **檢索知識庫**（第 {state.get('iteration', 0) + 1} 輪）"]
     company = state["company"]
     quarters_filter = state.get("quarters", []) or None
-    tool_plan = state.get("tool_plan", ["qdrant"])
+    tool_plan = state.get("tool_plan", ["bigquery"])
     sub_queries = state.get("sub_queries", [])
     iteration = state.get("iteration", 0)
 
@@ -266,8 +266,8 @@ def parallel_retrieval(state: AgentState) -> dict:
         return base
 
     # ── 定義各工具的任務函式 ──────────────────────────────────────────
-    def _do_qdrant(sq: dict) -> list[dict]:
-        """單一 qdrant sub_query 的檢索，供 ThreadPoolExecutor 呼叫。"""
+    def _do_bigquery(sq: dict) -> list[dict]:
+        """單一 bigquery sub_query 的檢索，供 ThreadPoolExecutor 呼叫。"""
         # [f] 使用者選定季度時，所有子查詢（含 cross_quarter）都必須遵守；
         # 只有使用者未指定季度（quarters_filter=None）時，cross_quarter 才查全部季度。
         # [A5+] target_quarter 是 self_reflect 標記的弱季專屬查詢；
@@ -290,15 +290,15 @@ def parallel_retrieval(state: AgentState) -> dict:
 
     # ── 建立任務清單（future → 用途標籤）────────────────────────────
     futures_map = {}
-    # [c] 實際任務數：最多 2 qdrant + 1 tavily + 1 yfinance = 4
+    # [c] 實際任務數：最多 2 bigquery + 1 tavily + 1 yfinance = 4
     # 過多 worker 浪費資源；動態計算避免未來工具變更時需要手動更新
-    _n_workers = min(len([sq for sq in sub_queries if sq.get("tool") == "qdrant"]) + 2, 6)
+    _n_workers = min(len([sq for sq in sub_queries if sq.get("tool") == "bigquery"]) + 2, 6)
     with ThreadPoolExecutor(max_workers=_n_workers) as executor:
-        if "qdrant" in tool_plan:
+        if "bigquery" in tool_plan:
             for sq in sub_queries:
-                if sq.get("tool") == "qdrant":
-                    fut = executor.submit(_do_qdrant, sq)
-                    futures_map[fut] = ("qdrant", sq)
+                if sq.get("tool") == "bigquery":
+                    fut = executor.submit(_do_bigquery, sq)
+                    futures_map[fut] = ("bigquery", sq)
 
         if "tavily" in tool_plan:
             fut = executor.submit(_do_tavily)
@@ -320,7 +320,7 @@ def parallel_retrieval(state: AgentState) -> dict:
                 log.append(f"  ⚠ [{kind}] 查詢失敗（{_etype}），不影響其他工具結果")
                 continue
 
-            if kind == "qdrant":
+            if kind == "bigquery":
                 for chunk in result:
                     quarter = chunk.get("payload", {}).get("quarter", "unknown")
                     # [b] 依 chunk id 去重，避免 retry 輪重複追加相同 chunk
@@ -578,11 +578,11 @@ gaps 應指出「retrieve 還沒抓到但對回答有幫助」的主題（如：
         log.append(f"  🔄 觸發重查（第 {iteration + 1} 次）")
 
         # [A3+] (1) gap-driven：依 LLM 指出的缺漏主題產生通用查詢
-        # tool_hint：含「新聞/市場/最新/外部/競爭/產業」→ tavily；其餘 → qdrant
+        # tool_hint：含「新聞/市場/最新/外部/競爭/產業」→ tavily；其餘 → bigquery
         _NEWS_KWS = ("新聞", "市場", "最新", "外部", "競爭", "產業")
         rebuilt: list[dict] = []
         for i, gap in enumerate(gaps):
-            tool = "tavily" if any(kw in gap for kw in _NEWS_KWS) else "qdrant"
+            tool = "tavily" if any(kw in gap for kw in _NEWS_KWS) else "bigquery"
             rebuilt.append({
                 "id": f"gap_{i}",
                 "query": f"{company} {gap}",
@@ -612,7 +612,7 @@ gaps 應指出「retrieve 還沒抓到但對回答有幫助」的主題（如：
                 # 用更廣的查詢字串覆蓋該季（提高 recall）
                 "query": f"{company} {wq} {topic} 發言重點",
                 "purpose": f"補強弱季 {wq}",
-                "tool": "qdrant",
+                "tool": "bigquery",
                 "tool_hint": "coverage_fill",
                 "target_quarter": wq,  # parallel_retrieval 會用此覆蓋 quarters_filter
             })

@@ -2,43 +2,21 @@
 # EarningsWatch 一鍵啟動腳本
 # 用法：./start.sh
 #   前台執行 Streamlit（按 Ctrl+C 停止）
-#   Qdrant 以 Docker daemon 模式在背景持續運行
+#   資料庫已遷移至 GCP BigQuery Serverless，無需本機啟動資料庫容器。
 #
 # ⚠ 安全注意（部署到網際網路前必讀）：
-#   - Qdrant 綁定 127.0.0.1，僅供本機 Streamlit 存取，外部無法直接連線
 #   - Streamlit 若需對外，請在前端加 nginx 反向代理並啟用 HTTPS
-#   - 對外部署建議使用 Qdrant Cloud（QDRANT_URL + QDRANT_API_KEY），
-#     此時此腳本中的 Docker 區塊可省略
 
 set -euo pipefail
 cd "$(dirname "$0")"
 
-# ── 1. 啟動 Qdrant（透過 docker-compose，宣告式服務定義）─────────────────────
-# [f] 安全姿態（127.0.0.1 綁定、volume mount）皆移到 docker-compose.yml；
-#     此處只負責呼叫。`docker compose up -d` 是 idempotent —
-#     既有容器繼續用，沒容器才建立。
-echo "🐳 啟動 Qdrant..."
-if ! docker compose version >/dev/null 2>&1; then
-    echo "❌ 找不到 docker compose。請更新 Docker（v20.10+ 內建 compose v2）。"
-    exit 1
+# ── 1. 確認 GCP 環境變數 ───────────────────────────────────────────────────
+if [ -z "${GOOGLE_CLOUD_PROJECT:-}" ]; then
+    echo "⚠ 警告: 尚未設定 GOOGLE_CLOUD_PROJECT 環境變數。"
+    echo "  程式將嘗試使用預設的 GCP 專案（若環境有設定 ADC）。"
 fi
-docker compose up -d qdrant
 
-# ── 2. 等待 Qdrant 就緒（最多 30 秒）───────────────────────────────────────
-echo "⏳ 等待 Qdrant 就緒..."
-TIMEOUT=30
-COUNT=0
-until curl -sf http://localhost:6333/healthz >/dev/null; do
-    sleep 1
-    COUNT=$((COUNT + 1))
-    if [ "$COUNT" -ge "$TIMEOUT" ]; then
-        echo "❌ Qdrant 啟動逾時（${TIMEOUT} 秒）。請確認 Docker 是否正常運行。"
-        exit 1
-    fi
-done
-echo "✅ Qdrant 就緒（${COUNT}s）"
-
-# ── 3. 啟動 Streamlit（前台，Ctrl+C 停止）──────────────────────────────────
+# ── 2. 啟動 Streamlit（前台，Ctrl+C 停止）──────────────────────────────────
 # [f] 本機開發：server.address 設為 127.0.0.1 僅本機可存取
 #     對外部署：改 127.0.0.1 → 0.0.0.0，但必須搭配 nginx HTTPS 反向代理
 echo "🚀 啟動 Streamlit → http://localhost:8501"

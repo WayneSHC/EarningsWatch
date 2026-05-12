@@ -1,0 +1,38 @@
+
+這是一份為您準備的技術交接摘要，您可以直接提供給接手的團隊成員，以便他們快速掌握目前系統架構的變更狀態與後續重點。
+
+### EarningsWatch 專案遷移交接摘要
+
+#### 1. 專案背景與達成目標
+為提升系統擴展性與降低本機狀態維護成本，我們已將 EarningsWatch Agentic RAG 平台的向量資料庫由本機 Docker 版本的 Qdrant 徹底遷移至 Google Cloud BigQuery Vector Search，並將 Embedding 模型轉換至 Vertex AI 託管服務。此舉使檢索架構達到無伺服器（Serverless）化。
+
+#### 2. 已完成之核心工程
+A. **基礎設施與依賴套件清理**
+*   自 `requirements.txt` 移除 `qdrant-client` 與 `sentence-transformers`，新增 `google-cloud-bigquery` 與 `google-cloud-aiplatform`。
+*   刪除廢棄的 `docker-compose.yml` 與 `src/core/qdrant_client.py`。
+*   清理 `start.sh`，移除所有與啟動本機資料庫容器相關的邏輯。
+
+B. **資料寫入管道（Ingestion Pipeline）重構**
+*   更新 `src/ingestion/embedder.py`，改用 Vertex AI `text-multilingual-embedding-002` 模型。
+*   將資料儲存邏輯由 Qdrant 的 Upsert 操作，變更為 BigQuery 的 Streaming Insert（`insert_rows_json`）。
+*   修正 `scripts/run_ingestion.py` 的檢查機制與提示字串，使其完全對接 BigQuery 專案。
+
+C. **檢索層與 Agent 邏輯（Retrieval & Agent）重構**
+*   核心重構：於 `src/core/retriever.py` 移除 Qdrant API 呼叫，改採 SQL `VECTOR_SEARCH` 進行檢索。
+*   效能最佳化：利用 SQL 的 `PARTITION BY` 與視窗函數取代原先 `retrieve_coverage` 中的多次平行迴圈呼叫，降低 I/O 等待時間。
+*   工具路由更新：於 `src/agent/nodes.py` 與前端渲染層 `src/ui/views/single.py` 將系統工具指定名稱由 qdrant 統一變更為 bigquery。
+*   動態選單優化：將前端拉取有效季度列表的邏輯 `src/ui/quarters.py` 改為直接執行 BigQuery 的 `SELECT DISTINCT`。
+
+#### 3. 交接後續待辦事項（Next Steps）
+請接手成員依序確認並執行以下項目：
+
+1. **環境變數與權限驗證**
+   *   確保目標部署環境（如 Cloud Run）的 Service Account 具備 `BigQuery Data Editor` 與 `AI Platform User` 權限。
+   *   確認 `GOOGLE_CLOUD_PROJECT` 已正確設定於 `.env` 或 GCP 環境變數中。
+
+2. **生產環境安全配置**
+   *   目前的架構仍透過 `.env` 讀取外部 API 金鑰（包含 OpenAI、Gemini、Tavily）。部署至線上前，必須將這些金鑰全數轉移至 GCP Secret Manager 進行統一管控。
+
+3. **系統效能與成本監控**
+   *   雖然 BigQuery Vector Search 便於維護，但接手後應實測高併發情況下的 SQL 檢索延遲。
+   *   需於 GCP 控制台監控 Vertex AI Embedding 服務的 API 呼叫開銷，確保符合專案預算。

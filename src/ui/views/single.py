@@ -76,7 +76,7 @@ def render_single_company_result(ui: UIState) -> None:
 
     # ── RAG Agent 行為展示 ──────────────────────────────────────────────────
     _iteration    = result.get("iteration", 1)
-    _tool_plan    = result.get("tool_plan", ["qdrant"])
+    _tool_plan    = result.get("tool_plan", ["bigquery"])
     _news_ctx     = result.get("news_context", [])
     _stock        = result.get("stock_data", {})
     _retrieved_r  = result.get("retrieved", {})
@@ -340,7 +340,7 @@ def render_single_company_result(ui: UIState) -> None:
         if _sub_qs:
             st.markdown("##### 📋 Query Decomposer — 問題拆解")
             st.caption("Agent 不直接搜尋，而是先將問題拆解為結構化子任務：")
-            _tool_icons = {"qdrant": "🗄️", "tavily": "📰", "yfinance": "📈"}
+            _tool_icons = {"bigquery": "🗄️", "tavily": "📰", "yfinance": "📈"}
             for _sq in _sub_qs:
                 _ti = _tool_icons.get(_sq.get("tool", ""), "🔧")
                 st.markdown(
@@ -409,7 +409,7 @@ def render_single_company_result(ui: UIState) -> None:
 &nbsp;&nbsp;&nbsp;&nbsp;↓<br>
 <span style="color:#1d4ed8">③ 選擇工具</span>（Router）　→　決定 RAG / 新聞 / 股價<br>
 &nbsp;&nbsp;&nbsp;&nbsp;↓<br>
-<span style="color:#1d4ed8">④ 並行檢索</span>（Retrieval）　→　Qdrant + Coverage Sweep + Cohere Rerank<br>
+<span style="color:#1d4ed8">④ 並行檢索</span>（Retrieval）　→　BigQuery + Coverage Sweep + Cohere Rerank<br>
 &nbsp;&nbsp;&nbsp;&nbsp;↓<br>
 <span style="color:#7c3aed">⑤ 矛盾偵測</span>（Detector）　→　LLM 跨季語意比對<br>
 &nbsp;&nbsp;&nbsp;&nbsp;↓<br>

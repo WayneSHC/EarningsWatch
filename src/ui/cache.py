@@ -4,7 +4,7 @@ src/ui/cache.py
 Demo 保底快取 + XSS 防護字串工具。
 
 設計動機：
-  - Streamlit Cloud 上若 LLM API 配額用盡或 Qdrant 連線失敗，
+  - Streamlit Cloud 上若 LLM API 配額用盡或 BigQuery 連線失敗，
     至少要能展示先前成功跑過的結果（demo_cache.json），不然 demo 直接 0 分。
   - `_sanitize_str` 是所有插入 HTML 字串的單一入口，
     集中在這裡方便日後加白名單 / 長度限制等政策。
@@ -92,7 +92,7 @@ def save_to_cache(
         "confidence":     result.get("confidence", 0.0),
         # RAG Agent 展示欄位
         "iteration":      result.get("iteration", 1),
-        "tool_plan":      result.get("tool_plan", ["qdrant"]),
+        "tool_plan":      result.get("tool_plan", ["bigquery"]),
         "news_context":   result.get("news_context", []),
         "stock_data":     result.get("stock_data", {}),
         "sub_queries":    result.get("sub_queries", []),

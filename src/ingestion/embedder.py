@@ -1,66 +1,64 @@
 """
 src/ingestion/embedder.py
-批次 embedding + 寫入 Qdrant。
-使用 paraphrase-multilingual-mpnet-base-v2（768 維），本地執行，完全免費。
+批次 embedding + 寫入 BigQuery。
+使用 Vertex AI text-multilingual-embedding-002 (768 維)。
 """
 
 import hashlib
 from functools import lru_cache
 from typing import Any
 
-from sentence_transformers import SentenceTransformer
+from vertexai.language_models import TextEmbeddingInput, TextEmbeddingModel
 from tqdm import tqdm
-from qdrant_client.models import PointStruct
 
-from src.core.qdrant_client import get_qdrant_client, ensure_collection, COLLECTION_NAME
+from src.core.bq_client import get_bq_client, get_table_path, ensure_dataset_and_table
 
-EMBEDDING_MODEL = "paraphrase-multilingual-mpnet-base-v2"
+EMBEDDING_MODEL = "text-multilingual-embedding-002"
 BATCH_SIZE = 64
 UPSERT_BATCH = 100
 
-
 @lru_cache(maxsize=1)
-def _get_model() -> SentenceTransformer:
-    print(f"[Embedder] 載入模型 {EMBEDDING_MODEL}（首次載入需下載約 420MB）...")
-    return SentenceTransformer(EMBEDDING_MODEL)
-
+def _get_model() -> TextEmbeddingModel:
+    print(f"[Embedder] 載入模型 Vertex AI {EMBEDDING_MODEL}...")
+    return TextEmbeddingModel.from_pretrained(EMBEDDING_MODEL)
 
 def embed_texts(texts: list[str]) -> list[list[float]]:
     """批次取得 embedding，回傳與 texts 等長的向量列表。"""
+    if not texts:
+        return []
     model = _get_model()
-    embeddings = model.encode(
-        texts,
-        batch_size=BATCH_SIZE,
-        show_progress_bar=False,
-        convert_to_numpy=True,
-    )
-    return embeddings.tolist()
-
+    embeddings = []
+    
+    # 批次發送請求
+    for i in range(0, len(texts), BATCH_SIZE):
+        batch_texts = texts[i:i + BATCH_SIZE]
+        inputs = [TextEmbeddingInput(t, "RETRIEVAL_DOCUMENT") for t in batch_texts]
+        # model.get_embeddings 支援 list of TextEmbeddingInput
+        batch_embeddings = model.get_embeddings(inputs)
+        embeddings.extend([emb.values for emb in batch_embeddings])
+        
+    return embeddings
 
 def upsert_chunks(chunks: list[dict], show_progress: bool = True) -> int:
     """
-    將 chunks 批次 embedding 後寫入 Qdrant。
+    將 chunks 批次 embedding 後寫入 BigQuery。
     回傳成功寫入的筆數。
     """
     if not chunks:
         print("[Embedder] 沒有 chunk 可寫入")
         return 0
 
-    client = get_qdrant_client()
-    ensure_collection(client)
+    client = get_bq_client()
+    ensure_dataset_and_table(client)
 
     texts = [c["content"] for c in chunks]
     print(f"[Embedder] 開始 embedding {len(texts)} 個 chunk...")
 
     embeddings = embed_texts(texts)
 
-    points = []
+    rows_to_insert = []
     for chunk, vector in zip(chunks, embeddings):
-        payload = {k: v for k, v in chunk.items() if k != "content"}
-        payload["content"] = chunk["content"]
         # Deterministic ID：source_file + source_page + chunk_index 的 SHA-256 → UUID 格式
-        # 三欄組合確保跨頁的同序號 chunk 不互相覆蓋
-        # 重複匯入同一 PDF 時 upsert 會覆蓋而非新增，徹底防止重複
         id_seed = (
             f"{chunk.get('source_file', '')}"
             f"::{chunk.get('source_page', 0)}"
@@ -68,21 +66,34 @@ def upsert_chunks(chunks: list[dict], show_progress: bool = True) -> int:
         )
         chunk_id = hashlib.sha256(id_seed.encode()).hexdigest()
         chunk_id = f"{chunk_id[:8]}-{chunk_id[8:12]}-{chunk_id[12:16]}-{chunk_id[16:20]}-{chunk_id[20:32]}"
-        points.append(PointStruct(
-            id=chunk_id,
-            vector=vector,
-            payload=payload,
-        ))
+        
+        row = {
+            "id": chunk_id,
+            "company": chunk.get("company"),
+            "quarter": chunk.get("quarter"),
+            "section": chunk.get("section"),
+            "content": chunk.get("content"),
+            "source_file": chunk.get("source_file"),
+            "source_page": chunk.get("source_page"),
+            "chunk_index": chunk.get("chunk_index"),
+            "embedding": vector,
+        }
+        rows_to_insert.append(row)
 
     total_written = 0
-    iterator = range(0, len(points), UPSERT_BATCH)
+    table_id = get_table_path()
+    
+    iterator = range(0, len(rows_to_insert), UPSERT_BATCH)
     if show_progress:
-        iterator = tqdm(iterator, desc="寫入 Qdrant", unit="批")
+        iterator = tqdm(iterator, desc="寫入 BigQuery", unit="批")
 
     for i in iterator:
-        batch = points[i:i + UPSERT_BATCH]
-        client.upsert(collection_name=COLLECTION_NAME, points=batch)
-        total_written += len(batch)
+        batch = rows_to_insert[i:i + UPSERT_BATCH]
+        errors = client.insert_rows_json(table_id, batch)
+        if errors:
+            print(f"[Embedder] BigQuery 寫入錯誤: {errors}")
+        else:
+            total_written += len(batch)
 
     print(f"[Embedder] 完成，共寫入 {total_written} 筆")
     return total_written

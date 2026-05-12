@@ -10,7 +10,7 @@ PDF 批次匯入 Pipeline — 唯一入口
        格式 B（英文逐字稿）：TSMC {季號}Q{2位年} Transcript{後綴}.pdf
          例：TSMC 4Q25 Transcript.pdf、TSMC 4Q24 Transcript-2.pdf
   3. 讀取 data/processed/ingestion_log.json，跳過已成功處理的檔案
-  4. 依序執行：smart_parser → chunker → embedder → Qdrant upsert
+  4. 依序執行：smart_parser → chunker → embedder → BigQuery insert
   5. 任一檔案失敗不中斷批次，繼續處理其餘檔案
 
 使用方式：
@@ -331,18 +331,18 @@ def _save_log(log: dict) -> None:
 def _ingest_one(pdf_path: Path, meta: dict) -> int:
     """
     執行單一 PDF 的完整匯入流程：
-      smart_parser → chunker → embedder（含 Qdrant upsert）
+      smart_parser → chunker → embedder（含 BigQuery insert）
 
     Args:
         pdf_path: PDF 檔案絕對路徑
         meta:     由 parse_filename 產生的 metadata dict
 
     Returns:
-        成功寫入 Qdrant 的 chunk 數量
+        成功寫入 BigQuery 的 chunk 數量
 
     Raises:
         ValueError: PDF 無有效內容時
-        其他 Exception: embedder 或 Qdrant 通訊錯誤（由呼叫端捕捉）
+        其他 Exception: embedder 或 BigQuery 通訊錯誤（由呼叫端捕捉）
     """
     from src.ingestion.smart_parser import parse_pdf
     from src.ingestion.chunker import chunk_document
@@ -367,7 +367,7 @@ def _ingest_one(pdf_path: Path, meta: dict) -> int:
 
     print(f"  → 解析：{len(pages)} 頁 → {len(chunks)} 個 chunk")
 
-    # Step 3：Embedding + Qdrant upsert（批次處理，含進度條）
+    # Step 3：Embedding + BigQuery insert（批次處理，含進度條）
     written = upsert_chunks(chunks, show_progress=True)
     return written
 
@@ -395,7 +395,7 @@ def main() -> None:
     )
     arg_parser.add_argument(
         "--dry-run", action="store_true", dest="dry_run",
-        help="只列出待處理清單，不實際寫入 Qdrant",
+        help="只列出待處理清單，不實際寫入 BigQuery",
     )
     arg_parser.add_argument(
         "--lang", choices=["M", "E"],
@@ -415,15 +415,15 @@ def main() -> None:
     if args.lang:    print(f"  過濾：只處理語言 = {args.lang}")
     print("=" * 60)
 
-    # ── Qdrant 連線確認（dry-run 模式跳過，避免不必要的網路需求）────────────
+    # ── BigQuery 專案確認 ──────────────────────────────────────────────────
     if not args.dry_run:
-        from src.core.qdrant_client import health_check
-        if not health_check():
-            print("\n❌ 無法連線至 Qdrant，請先啟動 Docker：")
-            print("   docker run -d --name qdrant -p 6333:6333 \\")
-            print("     -v $(pwd)/qdrant_storage:/qdrant/storage qdrant/qdrant")
+        from src.core.bq_client import get_bq_client
+        try:
+            client = get_bq_client()
+            print(f"✅ BigQuery 連線正常 (Project: {client.project})\n")
+        except Exception as e:
+            print(f"\n❌ 無法連線至 BigQuery: {e}")
             sys.exit(1)
-        print("✅ Qdrant 連線正常\n")
 
     # ── 確認 PDF 目錄存在 ─────────────────────────────────────────────────
     if not RAW_PDF_DIR.exists():
@@ -548,7 +548,7 @@ def main() -> None:
             traceback.print_exc()   # 完整堆疊供除錯
             print()
 
-    # ── 清除 BM25 索引快取（新 PDF 已寫入 Qdrant，舊索引已過時）──────────
+    # ── 清除快取 ──────────────────────────────────────────────────────────
     if success_count > 0:
         try:
             from src.core.retriever import clear_retriever_cache
