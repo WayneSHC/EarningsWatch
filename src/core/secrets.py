@@ -115,3 +115,26 @@ def clear_cache() -> None:
     """Force re-read of all secrets. Useful in tests / after rotation."""
     _fetch_from_gcp.cache_clear()
     _sm_client.cache_clear()
+
+
+def bridge_to_env(*names: str) -> None:
+    """
+    Copy named secrets from Secret Manager into os.environ.
+
+    Some third-party libraries (e.g. LangChain reading LANGSMITH_API_KEY for
+    tracing) consult os.environ directly and never see values that live only
+    in Secret Manager. This helper bridges the gap.
+
+    Only writes when the env var is currently empty/unset — values the user
+    has explicitly set in .env or the shell are preserved.
+
+    Typical use (call once at app startup, after load_dotenv):
+        from src.core.secrets import bridge_to_env
+        bridge_to_env("LANGSMITH_API_KEY")
+    """
+    for name in names:
+        if os.environ.get(name, "").strip():
+            continue  # respect existing env
+        val = get_secret(name)
+        if val:
+            os.environ[name] = val

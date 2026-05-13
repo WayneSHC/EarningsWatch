@@ -20,6 +20,12 @@ from dotenv import load_dotenv
 
 load_dotenv(_PROJECT_ROOT / ".env")
 
+# [f] Bridge LangSmith key from GCP Secret Manager → os.environ so LangChain's
+# tracing layer (which reads env vars directly) can pick it up. Tavily /
+# LlamaParse don't need this — they call get_secret() explicitly.
+from src.core.secrets import bridge_to_env  # noqa: E402
+bridge_to_env("LANGSMITH_API_KEY")
+
 import streamlit as st
 
 # UI 子模組（純函數、無 session 耦合）
