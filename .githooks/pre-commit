@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+# EarningsWatch pre-commit hook — block accidental secret leaks.
+#
+# Install with: ./scripts/install-hooks.sh   (configures core.hooksPath)
+# Bypass once (NOT recommended): git commit --no-verify
+
+set -u
+
+RED=$'\e[31m'; YELLOW=$'\e[33m'; RESET=$'\e[0m'
+
+fail() { printf "%s\n" "${RED}✗ pre-commit:${RESET} $*" >&2; }
+warn() { printf "%s\n" "${YELLOW}⚠ pre-commit:${RESET} $*" >&2; }
+
+violations=0
+
+# ── 1. Block staged .env / secrets files by name ────────────────────────────
+staged_names=$(git diff --cached --name-only --diff-filter=ACM)
+while IFS= read -r f; do
+    [ -z "$f" ] && continue
+    case "$f" in
+        .env|*.env|*/.env|*.env.local|*/.env.local)
+            fail "Refusing to commit secret file: $f"
+            fail "  Add it to .gitignore and run: git rm --cached \"$f\""
+            violations=$((violations + 1))
+            ;;
+        .streamlit/secrets.toml|*/.streamlit/secrets.toml)
+            fail "Refusing to commit Streamlit secrets file: $f"
+            violations=$((violations + 1))
+            ;;
+    esac
+done <<< "$staged_names"
+
+# ── 2. Scan staged diff content for known API-key prefixes ──────────────────
+# Each pattern is "label|regex". Patterns target real-key shapes, not
+# placeholders like "<your-...>". We scan the diff (added lines only) — files
+# already in the repo are not re-scanned.
+diff_added=$(git diff --cached --unified=0 -- ':!.env.example' ':!*.lock' \
+    | grep -E '^\+' | grep -Ev '^\+\+\+')
+
+scan() {
+    local label="$1" regex="$2"
+    local hits
+    hits=$(printf "%s\n" "$diff_added" | grep -E "$regex" || true)
+    if [ -n "$hits" ]; then
+        fail "Found possible $label in staged diff:"
+        printf "%s\n" "$hits" | sed 's/^/    /' | head -n 5 >&2
+        violations=$((violations + 1))
+    fi
+}
+
+# OpenAI / Anthropic-style: sk-<chars>. Require 20+ chars after the prefix to
+# avoid catching "sk-..." placeholders.
+scan "OpenAI/Anthropic key (sk-...)" 'sk-[A-Za-z0-9_-]{20,}'
+# Google API key (Gemini, etc.)
+scan "Google API key (AIza...)" 'AIza[0-9A-Za-z_-]{30,}'
+# Tavily
+scan "Tavily key (tvly-...)" 'tvly-[A-Za-z0-9_-]{20,}'
+# LlamaCloud
+scan "LlamaCloud key (llx-...)" 'llx-[A-Za-z0-9_-]{20,}'
+# LangSmith / LangChain
+scan "LangSmith key (ls__...)" 'ls__[A-Za-z0-9_-]{20,}'
+# Generic "API_KEY = '<long-base64-ish>'" assignments outside .env.example
+scan "Hardcoded API_KEY=..." "API_KEY[[:space:]]*[:=][[:space:]]*['\"][A-Za-z0-9_/+=-]{32,}['\"]"
+
+if [ "$violations" -gt 0 ]; then
+    fail "Commit blocked: $violations potential secret(s) detected."
+    warn "If this is a false positive, override once with: git commit --no-verify"
+    warn "Then rotate the leaked credential immediately."
+    exit 1
+fi
+
+exit 0

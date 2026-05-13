@@ -7,10 +7,29 @@ on:
     branches: [main]
 
 jobs:
+  secret-scan:
+    name: Secret Scan (Gitleaks)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Gitleaks needs full history to scan all commits on PRs.
+          fetch-depth: 0
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # No license needed for public repos; GITLEAKS_LICENSE env can be added
+          # later if this repo becomes private + uses org-level Gitleaks.
+          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: "false"
+          GITLEAKS_ENABLE_SUMMARY: "true"
+
   test:
     name: Compile + Unit Tests
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    needs: secret-scan
 
     steps:
       - uses: actions/checkout@v4

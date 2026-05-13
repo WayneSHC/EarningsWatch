@@ -242,7 +242,7 @@ class TestBackendManagement:
 
     def test_set_backend_rejects_missing_key(self, monkeypatch):
         monkeypatch.delenv("COHERE_API_KEY", raising=False)
-        with pytest.raises(ValueError, match="缺少 COHERE_API_KEY"):
+        with pytest.raises(ValueError, match="COHERE_API_KEY"):
             lc.set_backend("cohere")
 
 

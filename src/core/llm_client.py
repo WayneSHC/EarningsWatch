@@ -129,6 +129,32 @@ def friendly_error_message(exc: BaseException) -> str:
 # [b] 主備援順序：openai → gemini → cohere
 _AUTO_DETECT_ORDER = ["openai", "gemini", "cohere"]
 
+# [f] 偵測 .env.example 沒換掉就 deploy 的 placeholder。
+# 不擋 "test-*"：tests/conftest.py 與 CI smoke test 用 "test-openai" / "test-gemini"
+# 當 dummy（網路呼叫 monkeypatch 掉），那些情境是合法的「模組可載入」訊號。
+_PLACEHOLDER_MARKERS = (
+    "<your-", "your-key-here", "placeholder", "changeme",
+    "sk-...", "tvly-...", "llx-...", "ls__...",
+)
+
+
+def _is_placeholder_key(value: str) -> bool:
+    """[f] True if value is an obvious placeholder rather than a real API key."""
+    if not value:
+        return False
+    v = value.strip().lower()
+    return any(marker in v for marker in _PLACEHOLDER_MARKERS)
+
+
+def _get_real_key(env_name: str) -> str:
+    """讀取 env，若是 placeholder 則視為未設定（回空字串並警告一次）。"""
+    raw = os.getenv(env_name, "").strip()
+    if raw and _is_placeholder_key(raw):
+        # 不印出 key 內容，只說明環境變數名稱
+        print(f"[LLM] ⚠ {env_name} 看起來是 .env.example 的 placeholder，視為未設定")
+        return ""
+    return raw
+
 
 def _detect_backend() -> str:
     """
@@ -142,16 +168,17 @@ def _detect_backend() -> str:
             f"改為自動偵測"
         )
     if explicit in BACKEND_MODELS:
-        key = os.getenv(_KEY_ENV[explicit], "").strip()
+        key = _get_real_key(_KEY_ENV[explicit])
         if not key:
             raise EnvironmentError(
-                f"❌ LLM_BACKEND={explicit} 但找不到 {_KEY_ENV[explicit]}，請填入 .env"
+                f"❌ LLM_BACKEND={explicit} 但找不到有效的 {_KEY_ENV[explicit]}，"
+                f"請在 .env 填入真實 key（不要保留 <your-...> placeholder）"
             )
         return explicit
 
     # 自動偵測
     for backend in _AUTO_DETECT_ORDER:
-        if os.getenv(_KEY_ENV[backend], "").strip():
+        if _get_real_key(_KEY_ENV[backend]):
             return backend
 
     raise EnvironmentError(
@@ -470,7 +497,7 @@ def chat(prompt: str, max_tokens: int = 600, mode: str = "demo") -> str:
 
 def available_backends() -> list[str]:
     """[S1] 回傳目前環境中有 API Key 可用的所有後端，給 UI 切換器使用。"""
-    return [b for b in _AUTO_DETECT_ORDER if os.getenv(_KEY_ENV[b], "").strip()]
+    return [b for b in _AUTO_DETECT_ORDER if _get_real_key(_KEY_ENV[b])]
 
 
 def set_backend(backend: str) -> None:
@@ -478,8 +505,8 @@ def set_backend(backend: str) -> None:
     backend = backend.strip().lower()
     if backend not in BACKEND_MODELS:
         raise ValueError(f"未知後端：{backend}")
-    if not os.getenv(_KEY_ENV[backend], "").strip():
-        raise ValueError(f"{backend} 缺少 {_KEY_ENV[backend]}")
+    if not _get_real_key(_KEY_ENV[backend]):
+        raise ValueError(f"{backend} 缺少有效的 {_KEY_ENV[backend]}（或仍為 placeholder）")
     os.environ["LLM_BACKEND"] = backend
     _detect_backend.cache_clear()
 

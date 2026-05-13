@@ -1,0 +1,37 @@
+# Gitleaks config for EarningsWatch.
+# Extends the default ruleset (https://github.com/gitleaks/gitleaks/blob/master/config/gitleaks.toml)
+# and allowlists known-safe files (placeholder env templates, test fixtures).
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Allowlisted paths and patterns"
+
+paths = [
+    # Placeholder env template — contains <your-...-here> markers, not real keys.
+    '''^\.env\.example$''',
+    # Streamlit secrets template — same shape.
+    '''^\.streamlit/secrets\.toml\.example$''',
+    # Test fixtures and conftest use "test-openai" / "test-gemini" dummies.
+    '''^tests/''',
+    # CI workflow uses the same dummy values.
+    '''^\.github/workflows/ci\.yml$''',
+    # Project docs reference key prefixes for instructional purposes.
+    '''^README\.md$''',
+    '''^CLAUDE\.md$''',
+    '''^AGENTS\.md$''',
+    '''^docs/''',
+]
+
+regexes = [
+    # Known-safe placeholders introduced by this repo.
+    '''<your-[a-z-]+-key-here>''',
+    '''sk-\.\.\.''',
+    '''tvly-\.\.\.''',
+    '''llx-\.\.\.''',
+    '''ls__\.\.\.''',
+    '''test-openai''',
+    '''test-gemini''',
+    '''test-cohere''',
+]
