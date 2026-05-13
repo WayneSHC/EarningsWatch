@@ -1,38 +1,123 @@
 
-這是一份為您準備的技術交接摘要，您可以直接提供給接手的團隊成員，以便他們快速掌握目前系統架構的變更狀態與後續重點。
+這是一份為您準備的技術交接摘要，您可以直接提供給接手的團隊成員，
+以便他們快速掌握目前系統架構的變更狀態與後續重點。
 
-### EarningsWatch 專案遷移交接摘要
+最後更新：2026-05-13
+
+=========================================================================
+EarningsWatch 專案交接摘要
+=========================================================================
 
 #### 1. 專案背景與達成目標
-為提升系統擴展性與降低本機狀態維護成本，我們已將 EarningsWatch Agentic RAG 平台的向量資料庫由本機 Docker 版本的 Qdrant 徹底遷移至 Google Cloud BigQuery Vector Search，並將 Embedding 模型轉換至 Vertex AI 託管服務。此舉使檢索架構達到無伺服器（Serverless）化。
+
+為提升系統擴展性與降低本機狀態維護成本，EarningsWatch RAG Agent 平台
+已將向量資料庫由本機 Docker Qdrant 徹底遷移至 Google Cloud BigQuery
+Vector Search，Embedding 模型轉換至 Vertex AI 託管服務，使整個檢索
+架構達到無伺服器（Serverless）化。
 
 #### 2. 已完成之核心工程
-A. **基礎設施與依賴套件清理**
-*   自 `requirements.txt` 移除 `qdrant-client` 與 `sentence-transformers`，新增 `google-cloud-bigquery` 與 `google-cloud-aiplatform`。
-*   刪除廢棄的 `docker-compose.yml` 與 `src/core/qdrant_client.py`。
-*   清理 `start.sh`，移除所有與啟動本機資料庫容器相關的邏輯。
 
-B. **資料寫入管道（Ingestion Pipeline）重構**
-*   更新 `src/ingestion/embedder.py`，改用 Vertex AI `text-multilingual-embedding-002` 模型。
-*   將資料儲存邏輯由 Qdrant 的 Upsert 操作，變更為 BigQuery 的 Streaming Insert（`insert_rows_json`）。
-*   修正 `scripts/run_ingestion.py` 的檢查機制與提示字串，使其完全對接 BigQuery 專案。
+A. 基礎設施與依賴套件清理
+   - 自 requirements.txt 移除 qdrant-client 與 sentence-transformers，
+     新增 google-cloud-bigquery、google-cloud-aiplatform 與
+     google-cloud-secret-manager。
+   - 刪除廢棄的 docker-compose.yml 與 src/core/qdrant_client.py。
+   - 清理 start.sh，移除所有與啟動本機資料庫容器相關的邏輯。
 
-C. **檢索層與 Agent 邏輯（Retrieval & Agent）重構**
-*   核心重構：於 `src/core/retriever.py` 移除 Qdrant API 呼叫，改採 SQL `VECTOR_SEARCH` 進行檢索。
-*   效能最佳化：利用 SQL 的 `PARTITION BY` 與視窗函數取代原先 `retrieve_coverage` 中的多次平行迴圈呼叫，降低 I/O 等待時間。
-*   工具路由更新：於 `src/agent/nodes.py` 與前端渲染層 `src/ui/views/single.py` 將系統工具指定名稱由 qdrant 統一變更為 bigquery。
-*   動態選單優化：將前端拉取有效季度列表的邏輯 `src/ui/quarters.py` 改為直接執行 BigQuery 的 `SELECT DISTINCT`。
+B. 資料寫入管道（Ingestion Pipeline）重構
+   - 更新 src/ingestion/embedder.py，改用 Vertex AI
+     text-multilingual-embedding-002 模型。
+   - 將資料儲存邏輯由 Qdrant 的 Upsert 操作，變更為 BigQuery 的
+     Streaming Insert（insert_rows_json）。
+   - 修正 scripts/run_ingestion.py 的檢查機制與提示字串，使其完全
+     對接 BigQuery 專案。
 
-#### 3. 交接後續待辦事項（Next Steps）
+C. 檢索層與 Agent 邏輯（Retrieval & Agent）重構
+   - 核心重構：於 src/core/retriever.py 移除 Qdrant API 呼叫，改採
+     SQL VECTOR_SEARCH 進行檢索。
+   - 效能最佳化：利用 SQL 的 PARTITION BY 與視窗函數取代原先
+     retrieve_coverage 中的多次平行迴圈呼叫，降低 I/O 等待時間。
+   - 工具路由更新：於 src/agent/nodes.py 與前端渲染層
+     src/ui/views/single.py 將系統工具指定名稱由 qdrant 統一變更為
+     bigquery。
+   - 動態選單優化：將前端拉取有效季度列表的邏輯 src/ui/quarters.py
+     改為直接執行 BigQuery 的 SELECT DISTINCT。
+
+D. 安全性強化（2026-05-13 完成）
+   - GCP Secret Manager 整合：新增 src/core/secrets.py，透過
+     GCP_SECRET_PROJECT 環境變數切換來源；本機開發 fallback .env。
+   - 多層 API key 洩漏防護：.gitleaks.toml 規則 +
+     .githooks/pre-commit hook + LLM 錯誤訊息脫敏（防 raw HTTP
+     body 洩漏到 UI）。
+   - 助手腳本：scripts/setup_gcp_secrets.sh（一鍵建立 Secret
+     Manager 條目）、scripts/rotate_secret.sh（輪換 / 初次寫入）。
+   - LANGSMITH_API_KEY 從 Secret Manager 自動橋接到 env，方便
+     LangSmith tracing 直接 work。
+
+E. UI / Agent 體驗強化（2026-05-09 ~ 2026-05-13 完成）
+   - app.py 拆分為 views/single.py + views/multi.py；session_state
+     集中至 UIState dataclass。
+   - 自訂查詢欄位支援瀏覽器 Web Speech API 語音輸入。
+   - 前瞻型查詢自動路由到 Tavily 即時新聞節點。
+   - 主題改為可選欄位（不填則自動由 intent_classifier 推導）。
+   - UI 套用 Google Material Design；loading spinner 改為
+     infinity SVG 動畫。
+   - 雙層 Rate Limiting：session-based 10s + IP-based 10s（兼顧
+     開新分頁繞過情境）。
+   - CI Streamlit smoke test：捕捉 set_page_config / import 順序錯誤。
+
+F. LLM 後端調整
+   - 模型名稱校正：gpt-5 / gemini-2.5-flash（先前 gpt-5o / gemini-3
+     已 404）。
+   - Anthropic backend 回歸：Claude Sonnet 4.6 / Haiku 4.5（付費；
+     topup 後啟用），auto-detect 排在 free Gemini 之後。
+   - quota 用盡誤判為速率限制的 bug 已修正。
+
+#### 3. 目前架構速覽
+
+```
+使用者 ──▶ Cloud Run (Streamlit + LangGraph)
+              ├─ Secret Manager     ← LLM API Keys
+              ├─ BigQuery           ← Vector Search（earnings_data.earnings_calls）
+              ├─ Vertex AI          ← text-multilingual-embedding-002
+              ├─ OpenAI / Gemini / Anthropic / Cohere  ← LLM cascade
+              ├─ Tavily             ← 即時新聞
+              └─ Yahoo Finance      ← 股價
+```
+
+#### 4. 交接後續待辦事項（Next Steps）
+
 請接手成員依序確認並執行以下項目：
 
-1. **環境變數與權限驗證**
-   *   確保目標部署環境（如 Cloud Run）的 Service Account 具備 `BigQuery Data Editor` 與 `AI Platform User` 權限。
-   *   確認 `GOOGLE_CLOUD_PROJECT` 已正確設定於 `.env` 或 GCP 環境變數中。
+1. 環境變數與權限驗證
+   - 確保目標部署環境（如 Cloud Run）的 Service Account 具備
+     BigQuery Data Editor、AI Platform User、Secret Manager Secret
+     Accessor 三個權限。
+   - 確認 GOOGLE_CLOUD_PROJECT 已正確設定。
 
-2. **生產環境安全配置**
-   *   目前的架構仍透過 `.env` 讀取外部 API 金鑰（包含 OpenAI、Gemini、Tavily）。部署至線上前，必須將這些金鑰全數轉移至 GCP Secret Manager 進行統一管控。
+2. Secret Manager 切換
+   - 建議於 production 設定 GCP_SECRET_PROJECT 環境變數，將所有
+     LLM / API 金鑰移至 Secret Manager 統一管控。
+   - 使用 scripts/setup_gcp_secrets.sh 建立條目；後續輪換用
+     scripts/rotate_secret.sh。
 
-3. **系統效能與成本監控**
-   *   雖然 BigQuery Vector Search 便於維護，但接手後應實測高併發情況下的 SQL 檢索延遲。
-   *   需於 GCP 控制台監控 Vertex AI Embedding 服務的 API 呼叫開銷，確保符合專案預算。
+3. 系統效能與成本監控
+   - 雖然 BigQuery Vector Search 便於維護，但應實測高併發下的
+     SQL 檢索延遲。
+   - 於 GCP 控制台監控 Vertex AI Embedding 服務的 API 呼叫開銷，
+     確保符合專案預算。
+   - 部署 docs/DEPLOY_GCP.md 中 Cloud Run 預估月費 $0~$3 已涵蓋
+     30~50 人 demo 場景。
+
+4. 文件閱讀順序
+   - README.md            專案概覽 + 快速開始
+   - docs/PROJECT_OVERVIEW.md 30 分鐘 onboarding
+   - docs/DEPLOY_GCP.md   GCP Cloud Run 部署流程
+   - docs/ROADMAP.md      技術債 / 待辦
+   - CLAUDE.md            AI 助理協作規範與架構細節
+
+5. 已知尚未動工
+   - 部分舊文件（CLAUDE.md / AGENTS.md / docs/FULL_OVERVIEW.md /
+     docs/PROJECT_OVERVIEW.md / docs/system_architecture.md）仍有
+     Qdrant / migrate_to_cloud.py 字樣未清理。本次本只更新 README
+     與本檔，其餘文件留待後續批次整理。

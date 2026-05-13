@@ -6,7 +6,8 @@
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue)](https://www.python.org/)
 [![Streamlit](https://img.shields.io/badge/Streamlit-1.56-red)](https://streamlit.io/)
 [![LangGraph](https://img.shields.io/badge/LangGraph-1.1-green)](https://langchain-ai.github.io/langgraph/)
-[![Qdrant](https://img.shields.io/badge/Qdrant-1.17-purple)](https://qdrant.tech/)
+[![BigQuery](https://img.shields.io/badge/BigQuery-Vector%20Search-blue)](https://cloud.google.com/bigquery)
+[![Vertex AI](https://img.shields.io/badge/Vertex%20AI-Embedding-orange)](https://cloud.google.com/vertex-ai)
 
 ---
 
@@ -19,6 +20,26 @@ EarningsWatch 透過 **7 節點 LangGraph RAG Agent** 自動分析上市公司�
 - **立場趨勢圖**：視覺化呈現逐季態度變化（更樂觀 / 維持不變 / 更保守）
 - **多公司比較**：並行分析最多 3 家公司，生成跨公司對照表
 - **Self-Reflection**：Agent 自動評估信心度，不足則重查（最多 3 輪）
+- **🎤 語音輸入**：自訂查詢欄位支援瀏覽器原生 Web Speech API
+- **☁ Serverless 後端**：向量庫遷移至 BigQuery Vector Search + Vertex AI Embedding，免維護 Docker / Qdrant
+
+---
+
+## 🆕 最近更新（2026-05-08 起）
+
+| 日期 | 主題 |
+|---|---|
+| 2026-05-13 | 前瞻型查詢自動路由到 Tavily 即時新聞；自訂查詢欄位支援語音輸入 |
+| 2026-05-13 | GCP Secret Manager 整合 + `rotate_secret.sh` / `setup_gcp_secrets.sh` 助手腳本 |
+| 2026-05-13 | Anthropic backend 回歸（Claude Sonnet 4.6 / Haiku 4.5） |
+| 2026-05-13 | 多層 API key 洩漏防護（gitleaks + pre-commit + 錯誤訊息脫敏） |
+| 2026-05-12 | UI 改套 Google Material Design；loading spinner 改為 infinity SVG |
+| 2026-05-10 | GCP Cloud Run 部署設定 + demo cache 保底機制 |
+| 2026-05-09 | `app.py` 拆分為 `views/single.py` + `views/multi.py`；UIState dataclass 重構 |
+| 2026-05-09 | 主題改為可選（自動推導）；CI 新增 Streamlit smoke test |
+| 2026-05-08 | LLM 模型名稱校正：`gpt-5` / `gemini-2.5-flash` |
+
+詳細差異請見 [docs/CHANGES_SINCE_2026-05-08.md](docs/CHANGES_SINCE_2026-05-08.md)。
 
 ---
 
@@ -28,13 +49,13 @@ EarningsWatch 透過 **7 節點 LangGraph RAG Agent** 自動分析上市公司�
 PDF 法說會逐字稿
   → smart_parser（pdfplumber）
   → chunker（QA-pair / sliding-window）
-  → embedder（paraphrase-multilingual-mpnet-base-v2, 768維）
-  → Qdrant 向量資料庫
+  → embedder（Vertex AI text-multilingual-embedding-002, 768維）
+  → BigQuery Vector Search（Serverless，免維護向量庫）
 
 使用者查詢（Streamlit UI）
   → LangGraph 7 節點 Agent
        ① 分析意圖  ② 分解問題  ③ 選擇工具
-       ④ 並行檢索（Qdrant + Cohere Rerank + Coverage Sweep）
+       ④ 並行檢索（BigQuery VECTOR_SEARCH + Cohere Rerank + Coverage Sweep）
        ⑤ 矛盾偵測（LLM 語意比對）
        ⑥ Self-Reflection（信心度 < 0.75 → 重查）
        ⑦ 生成報告
@@ -48,7 +69,7 @@ PDF 法說會逐字稿
 ### 環境需求
 
 - Python 3.10+
-- Docker（本地 Qdrant）
+- GCP 專案（已啟用 BigQuery + Vertex AI；本機開發用 `gcloud auth application-default login`）
 - 至少一個 LLM API Key（推薦 Gemini，免費）
 
 ### 安裝
@@ -102,21 +123,35 @@ python scripts/run_ingestion.py --pdf TSMC\ 2Q24\ Transcript.pdf  # 單一檔案
 
 | 變數 | 必要 | 說明 |
 |---|---|---|
-| `OPENAI_API_KEY` | 擇一 | GPT-5o / GPT-5o-mini ★ 主力 |
-| `GEMINI_API_KEY` | 擇一 | Gemini 3.0 Flash（免費額度大）|
+| `GOOGLE_CLOUD_PROJECT` | 必填 | GCP 專案 ID（BigQuery + Vertex AI 都在這個專案下）|
+| `OPENAI_API_KEY` | 擇一 | GPT-5 / GPT-5-mini ★ 主力 |
+| `GEMINI_API_KEY` | 擇一 | Gemini 2.5 Flash（免費額度大）|
+| `ANTHROPIC_API_KEY` | 擇一 | Claude Sonnet 4.6 / Haiku 4.5（付費；topup 後啟用）|
 | `COHERE_API_KEY` | 擇一 | Command R+（同時用於 Rerank）|
 | `TAVILY_API_KEY` | 選填 | 即時新聞搜尋 |
-| `QDRANT_URL` | 選填 | Qdrant Cloud URL（不填用本地 Docker）|
-| `QDRANT_API_KEY` | 選填 | Qdrant Cloud Key |
 | `APP_PASSWORD` | 選填 | 對外部署時設定存取密碼 |
-| `LLM_BACKEND` | 選填 | 強制指定後端（openai / gemini / cohere）|
+| `LLM_BACKEND` | 選填 | 強制指定後端（openai / gemini / anthropic / cohere）|
+| `GCP_SECRET_PROJECT` | 選填 | 啟用 Secret Manager；填了之後所有金鑰會從 GCP Secret Manager 讀取，env var 為 fallback |
+| `LANGSMITH_API_KEY` | 選填 | LangSmith tracing（用 Secret Manager 時會自動橋接到 env）|
 
-> 🔄 **自動降級：** 主後端配額用完 / 觸發 429 / 模型下線 / 503 時，會印出友善訊息並自動切到下一個後端（順序：openai → gemini → cohere）。
-> ⛔ **已移除：** anthropic、groq（無 API Key）。
+> 🔄 **自動降級：** 主後端配額用完 / 觸發 429 / 模型下線 / 503 時，會印出友善訊息並自動切到下一個後端（順序：openai → gemini → anthropic → cohere）。
+> 🔐 **密鑰管理：** 部署到 GCP 時推薦設 `GCP_SECRET_PROJECT`，金鑰透過 Secret Manager 統一管控；本機開發仍可用 `.env`。
+> ⛔ **已移除：** groq（無 API Key）。
 
 ---
 
-## ☁️ Streamlit Cloud 部署
+## ☁️ 雲端部署
+
+**首選：GCP Cloud Run**（同 GCP 內走 BigQuery + Vertex AI 最順）
+
+```bash
+# 詳見 docs/DEPLOY_GCP.md
+gcloud run deploy earningswatch --source . --region asia-east1
+```
+
+Cloud Run Service Account 需要 `BigQuery Data Editor`、`AI Platform User`、`Secret Manager Secret Accessor` 三個角色。完整流程（含 `setup_gcp_secrets.sh` 一鍵建立 Secret Manager 條目、`rotate_secret.sh` 輪換金鑰）請參考 [docs/DEPLOY_GCP.md](docs/DEPLOY_GCP.md)。
+
+**次選：Streamlit Cloud**
 
 1. Fork 此 repo
 2. 在 Streamlit Cloud 連結 GitHub repo
@@ -124,13 +159,12 @@ python scripts/run_ingestion.py --pdf TSMC\ 2Q24\ Transcript.pdf  # 單一檔案
 
 ```toml
 # .streamlit/secrets.toml（勿上傳至 git）
+GOOGLE_CLOUD_PROJECT = "your-gcp-project"
 GEMINI_API_KEY = "你的金鑰"
-QDRANT_URL = "https://xxx.qdrant.io"
-QDRANT_API_KEY = "xxx"
 APP_PASSWORD = "設定存取密碼"
 ```
 
-> ⚠️ 使用 Qdrant Cloud 時，請在 [qdrant.tech](https://qdrant.tech) 建立免費 cluster 並先執行 `python scripts/migrate_to_cloud.py` 遷移資料。
+> ⚠️ Streamlit Cloud 仍需 BigQuery + Vertex AI 認證，請將 service-account JSON 放進 Streamlit secrets 並設定 `GOOGLE_APPLICATION_CREDENTIALS`。
 
 ---
 
@@ -140,21 +174,29 @@ APP_PASSWORD = "設定存取密碼"
 EarningsWatch/
 ├── src/
 │   ├── agent/          # LangGraph Agent（graph.py, nodes.py, state.py, tools.py）
-│   ├── core/           # 核心邏輯（llm_client, qdrant_client, retriever, contradiction, comparison）
+│   ├── core/           # 核心邏輯（llm_client, bq_client, retriever, contradiction,
+│   │                   #          comparison, secrets, telemetry, rate_limiter, ragas_eval）
 │   ├── ingestion/      # PDF 匯入流水線（smart_parser, chunker, embedder）
-│   └── ui/             # Streamlit UI（app.py, chart.py, export.py）
+│   └── ui/             # Streamlit UI（app.py + views/single.py / views/multi.py）
 ├── scripts/
-│   ├── run_ingestion.py        # PDF 匯入腳本
-│   └── migrate_to_cloud.py     # 遷移至 Qdrant Cloud
+│   ├── run_ingestion.py        # PDF 匯入腳本（寫入 BigQuery）
+│   ├── build_demo_cache.py     # 預跑常見組合產生 demo 保底快取
+│   ├── probe_llm_models.py     # 探測各 LLM 後端可用模型清單
+│   ├── setup_gcp_secrets.sh    # 一鍵建立 Secret Manager 條目
+│   └── rotate_secret.sh        # 輪換 / 初次寫入 Secret Manager 金鑰
 ├── tests/
 │   └── benchmark.py            # 30 題量化 Benchmark
 ├── docs/
-│   └── system_architecture.md  # 系統架構文件
+│   ├── DEPLOY_GCP.md           # GCP Cloud Run 部署流程
+│   ├── PROJECT_OVERVIEW.md     # 30 分鐘 onboarding
+│   ├── ROADMAP.md              # 技術債 / 待辦
+│   └── system_architecture.md  # 系統架構
 ├── .streamlit/
 │   └── config.toml             # Streamlit 安全設定
 ├── .env.example                # 環境變數範本
+├── Dockerfile                  # Cloud Run 用 image
 ├── requirements.txt
-└── start.sh                    # 一鍵啟動腳本
+└── start.sh                    # 本機啟動 Streamlit（資料庫已 Serverless 化）
 ```
 
 ---
@@ -165,9 +207,10 @@ EarningsWatch/
 |---|---|
 | XSS | 所有 LLM 輸出插入 HTML 前 `html.escape()` |
 | Prompt Injection | 輸入截斷 500 字 + 移除 HTML 標籤 |
-| API Key 洩漏 | 錯誤訊息只顯示 exception type，完整錯誤僅寫 server log |
-| Qdrant 暴露 | Docker 只綁定 `127.0.0.1:6333` |
-| API 濫用 | Rate Limiting 10秒冷卻 + 白名單驗證 |
+| API Key 洩漏 | 多層防護：`.gitleaks.toml` 偵測 + `.githooks/pre-commit` 阻擋 + 錯誤訊息只顯示 exception type |
+| 密鑰管理 | GCP Secret Manager 集中保管，runtime 透過 ADC 拉取；本機開發 fallback `.env` |
+| 向量庫存取 | BigQuery IAM 控管（Service Account 最小權限：BigQuery Data Editor + AI Platform User）|
+| API 濫用 | Rate Limiting 雙層（session-based 10s + IP-based 10s）+ 白名單驗證 |
 | 未授權存取 | `APP_PASSWORD` 環境變數控制密碼保護 |
 
 ---
@@ -176,14 +219,16 @@ EarningsWatch/
 
 | 分類 | 技術 | 版本 |
 |---|---|---|
-| Agent 框架 | LangGraph | 1.1.9 |
+| Agent 框架 | LangGraph | ≥ 0.2 |
 | UI | Streamlit | 1.56.0 |
-| 向量資料庫 | Qdrant | 1.17.1 |
-| Embedding | sentence-transformers | 5.4.1 |
-| Rerank | Cohere rerank-multilingual-v3.0 | — |
+| 向量資料庫 | BigQuery Vector Search | Serverless |
+| Embedding | Vertex AI `text-multilingual-embedding-002` | — |
+| Rerank | Cohere `rerank-multilingual-v3.0` | — |
+| 密鑰管理 | GCP Secret Manager | — |
 | PDF 解析 | pdfplumber | 0.11.9 |
 | 圖表 | Plotly | 6.7.0 |
 | PDF 匯出 | fpdf2 | 2.8.7 |
+| 部署 | GCP Cloud Run | — |
 
 ---
 
