@@ -106,7 +106,34 @@ with st.sidebar:
         "自訂問題（選填）",
         placeholder="例：台積電在 AI 需求上前後是否有矛盾？",
         height=80,
+        key="custom_query_text",
     )
+
+    # 語音輸入：錄音後用 OpenAI Whisper 轉錄並填入上方文字框
+    _audio = st.audio_input("🎤 或以語音輸入（會自動轉錄）", key="custom_query_audio")
+    if _audio is not None:
+        _audio_id = getattr(_audio, "file_id", None) or getattr(_audio, "name", None)
+        if _audio_id and st.session_state.get("_last_transcribed_id") != _audio_id:
+            with st.spinner("轉錄中…"):
+                try:
+                    # [f] 用 get_secret 而非 os.getenv：當 key 只在 GCP Secret Manager
+                    # 而 env var 為空時，os.getenv 會誤判成「未設定」；改走 secrets
+                    # 解析層與其他 client 行為一致。
+                    from src.core.secrets import get_secret
+                    if not get_secret("OPENAI_API_KEY"):
+                        raise RuntimeError("尚未設定 OPENAI_API_KEY，無法使用 Whisper 轉錄")
+                    from src.core.llm_client import _get_openai_client
+                    _client = _get_openai_client()
+                    _transcript = _client.audio.transcriptions.create(
+                        model="whisper-1",
+                        file=("audio.wav", _audio.getvalue(), "audio/wav"),
+                    )
+                    st.session_state["custom_query_text"] = (_transcript.text or "").strip()
+                    st.session_state["_last_transcribed_id"] = _audio_id
+                    st.rerun()
+                except Exception as _e:
+                    st.error(f"⚠️ 語音轉錄失敗：{_e}")
+    custom_query = st.session_state.get("custom_query_text", custom_query)
 
     st.divider()
     use_cache = st.toggle("使用 Demo 快取（API 呼叫失敗時的保底）", value=False)
