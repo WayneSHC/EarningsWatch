@@ -578,8 +578,12 @@ gaps 應指出「retrieve 還沒抓到但對回答有幫助」的主題（如：
         log.append(f"  🔄 觸發重查（第 {iteration + 1} 次）")
 
         # [A3+] (1) gap-driven：依 LLM 指出的缺漏主題產生通用查詢
-        # tool_hint：含「新聞/市場/最新/外部/競爭/產業」→ tavily；其餘 → bigquery
-        _NEWS_KWS = ("新聞", "市場", "最新", "外部", "競爭", "產業")
+        # tool_hint：含「新聞/市場/最新/外部/競爭/產業」或前瞻性詞彙 → tavily；
+        # 因法說會逐字稿只涵蓋過去發言，未來展望類 gap 需要外部新聞補充。
+        _NEWS_KWS = (
+            "新聞", "市場", "最新", "外部", "競爭", "產業",
+            "未來", "展望", "預期", "預測", "前景",
+        )
         rebuilt: list[dict] = []
         for i, gap in enumerate(gaps):
             tool = "tavily" if any(kw in gap for kw in _NEWS_KWS) else "bigquery"
