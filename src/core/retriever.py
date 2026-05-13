@@ -10,6 +10,7 @@ import cohere
 from google.cloud import bigquery
 
 from src.core.bq_client import get_bq_client, get_table_path
+from src.core.secrets import get_secret
 from src.ingestion.embedder import embed_texts, EMBEDDING_MODEL
 
 TOP_K_RETRIEVAL = 20
@@ -41,7 +42,7 @@ def _maybe_expand(query: str) -> str:
 
 @lru_cache(maxsize=1)
 def _get_cohere_client() -> cohere.Client | None:
-    key = os.getenv("COHERE_API_KEY", "").strip()
+    key = get_secret("COHERE_API_KEY")
     if not key:
         return None
     return cohere.Client(key)

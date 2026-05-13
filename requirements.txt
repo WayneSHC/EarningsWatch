@@ -17,6 +17,7 @@ langchain-core>=0.3.0             # LangGraph 底層依賴
 # ── 向量資料庫與 Embedding 模型（GCP 遷移）───────────────────────────────
 google-cloud-bigquery>=3.20.0     # BigQuery Vector Search
 google-cloud-aiplatform>=1.45.0   # Vertex AI Text Embedding
+google-cloud-secret-manager>=2.20.0  # API key 管理（GCP_SECRET_PROJECT 啟用時生效）
 
 # ── PDF 解析 ─────────────────────────────────────────────────────────────────
 pdfplumber>=0.11.0                # 純文字 + 表格解析（免費）

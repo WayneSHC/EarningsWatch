@@ -17,9 +17,10 @@ src/ui/auth.py
 from __future__ import annotations
 
 import hmac
-import os
 import time
 import streamlit as st
+
+from src.core.secrets import get_secret
 
 _MAX_ATTEMPTS = 5
 _LOCKOUT_SECONDS = 300  # 5 分鐘
@@ -31,7 +32,7 @@ def require_password() -> None:
     通過後設 `st.session_state["_authenticated"]=True` 並 rerun。
     失敗 _MAX_ATTEMPTS 次後鎖定 _LOCKOUT_SECONDS 秒。
     """
-    expected = os.getenv("APP_PASSWORD", "").strip()
+    expected = get_secret("APP_PASSWORD")
     if not expected:
         return  # 未設定 → 不啟用密碼保護
 

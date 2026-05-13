@@ -129,31 +129,13 @@ def friendly_error_message(exc: BaseException) -> str:
 # [b] 主備援順序：openai → gemini → cohere
 _AUTO_DETECT_ORDER = ["openai", "gemini", "cohere"]
 
-# [f] 偵測 .env.example 沒換掉就 deploy 的 placeholder。
+# [f] 鑰匙解析統一走 src.core.secrets：
+#   1. GCP_SECRET_PROJECT 有設 → 先查 Secret Manager
+#   2. 否則 → 讀 .env / process env
+#   3. placeholder（<your-...>, sk-..., 等）一律視為未設定
 # 不擋 "test-*"：tests/conftest.py 與 CI smoke test 用 "test-openai" / "test-gemini"
 # 當 dummy（網路呼叫 monkeypatch 掉），那些情境是合法的「模組可載入」訊號。
-_PLACEHOLDER_MARKERS = (
-    "<your-", "your-key-here", "placeholder", "changeme",
-    "sk-...", "tvly-...", "llx-...", "ls__...",
-)
-
-
-def _is_placeholder_key(value: str) -> bool:
-    """[f] True if value is an obvious placeholder rather than a real API key."""
-    if not value:
-        return False
-    v = value.strip().lower()
-    return any(marker in v for marker in _PLACEHOLDER_MARKERS)
-
-
-def _get_real_key(env_name: str) -> str:
-    """讀取 env，若是 placeholder 則視為未設定（回空字串並警告一次）。"""
-    raw = os.getenv(env_name, "").strip()
-    if raw and _is_placeholder_key(raw):
-        # 不印出 key 內容，只說明環境變數名稱
-        print(f"[LLM] ⚠ {env_name} 看起來是 .env.example 的 placeholder，視為未設定")
-        return ""
-    return raw
+from src.core.secrets import get_secret as _get_real_key  # noqa: E402
 
 
 def _detect_backend() -> str:
@@ -203,19 +185,21 @@ def get_model_name(mode: str = "demo") -> str:
 @lru_cache(maxsize=2)
 def _get_openai_client(api_key_env: str = "OPENAI_API_KEY", base_url: str | None = None):
     import openai
-    return openai.OpenAI(api_key=os.getenv(api_key_env), base_url=base_url)
+    # [f] _get_real_key resolves via Secret Manager when GCP_SECRET_PROJECT is set,
+    # else falls back to os.getenv — keeps SDK calls identical in both modes.
+    return openai.OpenAI(api_key=_get_real_key(api_key_env), base_url=base_url)
 
 
 @lru_cache(maxsize=1)
 def _get_gemini_client():
     from google import genai
-    return genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+    return genai.Client(api_key=_get_real_key("GEMINI_API_KEY"))
 
 
 @lru_cache(maxsize=1)
 def _get_cohere_llm_client():
     import cohere
-    return cohere.Client(os.getenv("COHERE_API_KEY", ""))
+    return cohere.Client(_get_real_key("COHERE_API_KEY"))
 
 
 # ── 各後端呼叫實作 ────────────────────────────────────────────────────────────

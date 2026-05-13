@@ -19,7 +19,8 @@ _STOCK_KEYWORDS = ["股價", "市值", "漲跌", "報酬", "ADR"]
 @lru_cache(maxsize=1)
 def _get_tavily():
     """Lazy 初始化 Tavily client；未設定 API Key 或未安裝 package 時回傳 None。"""
-    key = os.getenv("TAVILY_API_KEY", "")
+    from src.core.secrets import get_secret
+    key = get_secret("TAVILY_API_KEY")
     if not key:
         return None
     try:

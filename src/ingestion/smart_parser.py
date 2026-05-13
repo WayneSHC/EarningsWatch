@@ -13,17 +13,18 @@ src/ingestion/smart_parser.py
   }, ...]
 """
 
-import os
 import re
 from pathlib import Path
 from typing import Any
 import pdfplumber
 import pandas as pd
 
+from src.core.secrets import get_secret
+
 
 # ── 是否啟用 LlamaParse（需要 LLAMA_CLOUD_API_KEY）──────────────────────────
 def _get_llama_parser():
-    key = os.getenv("LLAMA_CLOUD_API_KEY", "")
+    key = get_secret("LLAMA_CLOUD_API_KEY")
     if not key:
         return None
     try:
