@@ -1,16 +1,18 @@
 """
 src/core/llm_client.py
-統一 LLM 呼叫介面：支援三種後端，一個環境變數切換
+統一 LLM 呼叫介面：支援四種後端，一個環境變數切換
 
 支援的後端（在 .env 設定 LLM_BACKEND）：
   openai    → GPT-5 / GPT-5-mini ★ 主力
   gemini    → Gemini 2.5 Flash（免費額度高）
+  anthropic → Claude Sonnet 4.6 / Haiku 4.5（付費，2026-05 回歸）
   cohere    → Command R+
 
 未設定 LLM_BACKEND 時自動偵測順序：
-  openai → gemini → cohere
+  openai → gemini → anthropic → cohere
+  （anthropic 排在 gemini 後面：先用免費 Gemini，再消耗付費 Claude 額度）
 
-已移除（無 API Key）：anthropic、groq
+已移除（無 API Key）：groq
 """
 
 import atexit
@@ -66,15 +68,20 @@ BACKEND_MODELS = {
         "dev":  "gemini-2.5-flash",
         "demo": "gemini-2.5-flash",             # Gemini 2.5 Flash — 免費額度大 ★ fallback 第二順位
     },
+    "anthropic": {
+        "dev":  "claude-haiku-4-5-20251001",    # Haiku 4.5 — 開發 / 高頻呼叫
+        "demo": "claude-sonnet-4-6",            # Sonnet 4.6 — ★ fallback 第三順位（付費）
+    },
     "cohere": {
         "dev":  "command-r7b-12-2024",
-        "demo": "command-r-plus-08-2024",       # Command R+ ★ fallback 第三順位
+        "demo": "command-r-plus-08-2024",       # Command R+ ★ fallback 第四順位
     },
 }
 
 _KEY_ENV = {
     "openai":    "OPENAI_API_KEY",
     "gemini":    "GEMINI_API_KEY",
+    "anthropic": "ANTHROPIC_API_KEY",
     "cohere":    "COHERE_API_KEY",
 }
 
@@ -126,8 +133,10 @@ def friendly_error_message(exc: BaseException) -> str:
         return f"LLM 服務暫時不可用（{etype}）"
     return f"LLM 呼叫失敗（{etype}）"
 
-# [b] 主備援順序：openai → gemini → cohere
-_AUTO_DETECT_ORDER = ["openai", "gemini", "cohere"]
+# [b] 主備援順序：openai → gemini → anthropic → cohere
+# anthropic 排在 gemini 之後：先消耗免費 Gemini 額度，再用付費 Claude 額度。
+# 若要把 Claude 提到第二順位，將 "anthropic" 移到 "gemini" 前即可。
+_AUTO_DETECT_ORDER = ["openai", "gemini", "anthropic", "cohere"]
 
 # [f] 鑰匙解析統一走 src.core.secrets：
 #   1. GCP_SECRET_PROJECT 有設 → 先查 Secret Manager
@@ -168,6 +177,7 @@ def _detect_backend() -> str:
         "請在 .env 填入以下任一個：\n"
         "  OPENAI_API_KEY     → GPT-5 / GPT-5-mini ★ 主力推薦\n"
         "  GEMINI_API_KEY     → Gemini 2.5 Flash（免費額度大）\n"
+        "  ANTHROPIC_API_KEY  → Claude Sonnet 4.6 / Haiku 4.5（付費）\n"
         "  COHERE_API_KEY     → Command R+"
     )
 
@@ -194,6 +204,12 @@ def _get_openai_client(api_key_env: str = "OPENAI_API_KEY", base_url: str | None
 def _get_gemini_client():
     from google import genai
     return genai.Client(api_key=_get_real_key("GEMINI_API_KEY"))
+
+
+@lru_cache(maxsize=1)
+def _get_anthropic_client():
+    import anthropic
+    return anthropic.Anthropic(api_key=_get_real_key("ANTHROPIC_API_KEY"))
 
 
 @lru_cache(maxsize=1)
@@ -266,6 +282,26 @@ def _call_gemini(prompt: str, model: str, max_tokens: int) -> tuple[str, int, in
     return text, p_tok, c_tok
 
 
+def _call_anthropic(prompt: str, model: str, max_tokens: int) -> tuple[str, int, int]:
+    """Anthropic 呼叫，回傳 (text, prompt_tokens, completion_tokens)。"""
+    client = _get_anthropic_client()
+    resp = client.messages.create(
+        model=model,
+        max_tokens=max_tokens,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    # content is a list of content blocks; take text from the first text block.
+    text = ""
+    for block in resp.content or []:
+        if getattr(block, "type", None) == "text" or hasattr(block, "text"):
+            text = (block.text or "").strip()
+            break
+    usage = getattr(resp, "usage", None)
+    p_tok = int(getattr(usage, "input_tokens", 0) or 0) if usage else 0
+    c_tok = int(getattr(usage, "output_tokens", 0) or 0) if usage else 0
+    return text, p_tok, c_tok
+
+
 def _call_cohere(prompt: str, model: str, max_tokens: int) -> tuple[str, int, int]:
     """Cohere 呼叫，回傳 (text, prompt_tokens, completion_tokens)。"""
     client = _get_cohere_llm_client()
@@ -298,6 +334,8 @@ def _dispatch(backend: str, prompt: str, model: str, max_tokens: int) -> tuple[s
         return _call_openai_compat(prompt, model, max_tokens)
     if backend == "gemini":
         return _call_gemini(prompt, model, max_tokens)
+    if backend == "anthropic":
+        return _call_anthropic(prompt, model, max_tokens)
     if backend == "cohere":
         return _call_cohere(prompt, model, max_tokens)
     raise ValueError(f"未知的 LLM 後端：{backend}")
@@ -332,6 +370,7 @@ _QUOTA_MARKERS = (
 _BACKEND_LABEL = {
     "openai": "OpenAI (GPT-5)",
     "gemini": "Gemini 2.5 Flash",
+    "anthropic": "Anthropic Claude Sonnet 4.6",
     "cohere": "Cohere Command R+",
 }
 
@@ -392,9 +431,11 @@ def chat(prompt: str, max_tokens: int = 600, mode: str = "demo") -> str:
 
     timeout_sec = _DEFAULT_TIMEOUT_SEC
     primary = _detect_backend()
+    # [b] 用 _get_real_key 而非 os.getenv：GCP Secret Manager 啟用時，env var 為空但
+    #     真正的 key 在 SM；改用 _get_real_key 才能讓 fallback 鏈正確工作。
     candidates = [primary] + [
         b for b in _AUTO_DETECT_ORDER
-        if b != primary and os.getenv(_KEY_ENV[b], "").strip()
+        if b != primary and _get_real_key(_KEY_ENV[b])
     ]
     last_err: Exception | None = None
 

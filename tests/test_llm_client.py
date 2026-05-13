@@ -1,14 +1,17 @@
 """
 Unit tests for src/core/llm_client.py.
 
-Coverage targets the multi-backend cascade (post anthropic/groq removal):
+Coverage targets the multi-backend cascade:
   - _detect_backend: explicit override / auto-detect order / no-key error
   - chat() cascade: quota markers trigger fallback, non-quota errors raise
   - Empty prompt rejection
   - set_backend / available_backends
 
-Active backends: openai → gemini → cohere
-Removed: anthropic, groq (no API key)
+Active backends: openai → gemini → anthropic → cohere
+Removed: groq (no API key)
+
+Tests leave ANTHROPIC_API_KEY unset by default (conftest) so the auto-detect
+order isn't affected. Tests that explicitly need it set it via monkeypatch.
 """
 import os
 
@@ -47,13 +50,20 @@ class TestDetectBackend:
         assert result in lc.BACKEND_MODELS
         assert "不在支援清單" in capsys.readouterr().out
 
-    def test_explicit_anthropic_no_longer_supported(self, monkeypatch, capsys):
-        # anthropic was removed; treat as unknown → warn + fall back
+    def test_explicit_anthropic_supported(self, monkeypatch):
+        # anthropic is now a supported backend; with a key set, _detect_backend honors it.
         monkeypatch.setenv("LLM_BACKEND", "anthropic")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-anthropic")
         lc._detect_backend.cache_clear()
-        result = lc._detect_backend()
-        assert result in lc.BACKEND_MODELS
-        assert "不在支援清單" in capsys.readouterr().out
+        assert lc._detect_backend() == "anthropic"
+
+    def test_explicit_anthropic_missing_key_raises(self, monkeypatch):
+        # Selecting anthropic without a key → same error path as any other backend.
+        monkeypatch.setenv("LLM_BACKEND", "anthropic")
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        lc._detect_backend.cache_clear()
+        with pytest.raises(EnvironmentError, match="ANTHROPIC_API_KEY"):
+            lc._detect_backend()
 
     def test_explicit_backend_missing_key_raises(self, monkeypatch):
         monkeypatch.setenv("LLM_BACKEND", "cohere")  # COHERE_API_KEY not set
@@ -235,10 +245,12 @@ class TestBackendManagement:
         with pytest.raises(ValueError, match="未知後端"):
             lc.set_backend("not_a_backend")
 
-    def test_set_backend_rejects_removed_anthropic(self):
-        # anthropic removed entirely → not in BACKEND_MODELS → "未知後端"
-        with pytest.raises(ValueError, match="未知後端"):
-            lc.set_backend("anthropic")
+    def test_set_backend_accepts_anthropic_with_key(self, monkeypatch):
+        # anthropic is supported again; set_backend should accept it when a key exists.
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-anthropic")
+        lc.set_backend("anthropic")
+        lc._detect_backend.cache_clear()
+        assert lc._detect_backend() == "anthropic"
 
     def test_set_backend_rejects_missing_key(self, monkeypatch):
         monkeypatch.delenv("COHERE_API_KEY", raising=False)

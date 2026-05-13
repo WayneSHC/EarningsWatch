@@ -128,13 +128,13 @@ Boilerplate filtering (two layers):
 
 ### LLM Backend (`src/core/llm_client.py`)
 
-Single `chat(prompt, max_tokens, mode)` entrypoint. Three active backends — auto-detect order: `openai → gemini → cohere`. `mode="dev"` uses cheaper/faster models; `mode="demo"` uses best quality.
+Single `chat(prompt, max_tokens, mode)` entrypoint. Four active backends — auto-detect order: `openai → gemini → anthropic → cohere`. `mode="dev"` uses cheaper/faster models; `mode="demo"` uses best quality.
 
-Models (2026-05): OpenAI `gpt-5` / `gpt-5-mini`, Gemini `gemini-2.5-flash`, Cohere `command-r-plus-08-2024`. Verified against live `models.list()` on 2026-05-08; the previous `gpt-5o` / `gemini-3.0-flash` names returned 404 and have been corrected.
+Models (2026-05): OpenAI `gpt-5` / `gpt-5-mini`, Gemini `gemini-2.5-flash`, Anthropic `claude-sonnet-4-6` / `claude-haiku-4-5-20251001`, Cohere `command-r-plus-08-2024`. Verified against live `models.list()` on 2026-05-08; the previous `gpt-5o` / `gemini-3.0-flash` names returned 404 and have been corrected.
 
 When a backend hits quota / 429 rate limit / 401-403 auth / 404 model-not-found / 503 unavailable, `chat()` prints a friendly Chinese message (e.g. `⚠️  OpenAI (GPT-5) 今日 token / 配額已用完，自動切換下一個後端…`) and falls through to the next backend. Network/timeout errors retry once on the same backend before falling through. Non-transient errors raise immediately.
 
-Anthropic and Groq backends were removed (no API key) — `LLM_BACKEND=anthropic` / `groq` is rejected with a warning.
+Anthropic returned in 2026-05 (after user top-up) — `LLM_BACKEND=anthropic` selects Claude Sonnet 4.6 for demo mode and Haiku 4.5 for dev. Auto-detect places it after free Gemini so paid credit is only consumed on fallback. Groq is still rejected with a warning.
 
 ### Rate Limiting (`src/core/rate_limiter.py`)
 

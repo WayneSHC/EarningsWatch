@@ -5,9 +5,10 @@
 # Python 版本：>= 3.10（使用 X | Y 型別語法）
 # ══════════════════════════════════════════════════════════════════════════════
 
-# ── LLM 後端（已移除無 API Key 的 anthropic / groq）─────────────────────────────
-openai>=1.50.0                    # GPT-5o / GPT-5o-mini ★ 主力
-google-genai>=1.0.0               # Gemini 3.0 Flash（新版 SDK：from google import genai）
+# ── LLM 後端（已移除無 API Key 的 groq；anthropic 2026-05 回歸）──────────────────
+openai>=1.50.0                    # GPT-5 / GPT-5-mini ★ 主力
+anthropic>=0.39.0                 # Claude Sonnet 4.6 / Haiku 4.5（付費；topup 後啟用）
+google-genai>=1.0.0               # Gemini 2.5 Flash（新版 SDK：from google import genai）
 cohere>=5.0.0                     # Command R+（同時用於 Rerank）
 
 # ── Agent 框架 ───────────────────────────────────────────────────────────────

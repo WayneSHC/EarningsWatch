@@ -43,6 +43,10 @@ _PRICING: dict[tuple[str, str], tuple[float, float]] = {
     ("gemini", "gemini-2.5-flash"):         (0.075, 0.30),
     ("gemini", "gemini-2.5-pro"):           (1.25,  5.00),
     ("gemini", "gemini-2.0-flash"):         (0.075, 0.30),
+    # ── Anthropic Claude 4 (2026-05 估算；正式上架後校對 https://www.anthropic.com/pricing) ──
+    ("anthropic", "claude-opus-4-7"):              (15.00, 75.00),
+    ("anthropic", "claude-sonnet-4-6"):            (3.00, 15.00),
+    ("anthropic", "claude-haiku-4-5-20251001"):    (1.00,  5.00),
     ("cohere", "command-r-plus-08-2024"):   (2.50, 10.00),
     ("cohere", "command-r7b-12-2024"):      (0.0375, 0.15),
 }
