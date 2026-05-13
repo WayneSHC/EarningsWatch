@@ -3,14 +3,14 @@ src/core/llm_client.py
 統一 LLM 呼叫介面：支援四種後端，一個環境變數切換
 
 支援的後端（在 .env 設定 LLM_BACKEND）：
-  openai    → GPT-5 / GPT-5-mini ★ 主力
-  gemini    → Gemini 2.5 Flash（免費額度高）
+  gemini    → Gemini 2.5 Flash（免費額度高）★ 主力
+  openai    → GPT-5 / GPT-5-mini（付費）
   anthropic → Claude Sonnet 4.6 / Haiku 4.5（付費，2026-05 回歸）
   cohere    → Command R+
 
 未設定 LLM_BACKEND 時自動偵測順序：
-  openai → gemini → anthropic → cohere
-  （anthropic 排在 gemini 後面：先用免費 Gemini，再消耗付費 Claude 額度）
+  gemini → openai → anthropic → cohere
+  （先用免費 Gemini 額度，再用付費 OpenAI / Claude）
 
 已移除（無 API Key）：groq
 """
@@ -62,11 +62,11 @@ _INJECTION_GUARD = (
 BACKEND_MODELS = {
     "openai": {
         "dev":  "gpt-5-mini",                   # GPT-5-mini — 開發 / 高頻呼叫
-        "demo": "gpt-5",                        # GPT-5 — 主力 ★ fallback 第一順位
+        "demo": "gpt-5",                        # GPT-5 — ★ fallback 第二順位（付費）
     },
     "gemini": {
         "dev":  "gemini-2.5-flash",
-        "demo": "gemini-2.5-flash",             # Gemini 2.5 Flash — 免費額度大 ★ fallback 第二順位
+        "demo": "gemini-2.5-flash",             # Gemini 2.5 Flash — 免費額度大 ★ fallback 第一順位
     },
     "anthropic": {
         "dev":  "claude-haiku-4-5-20251001",    # Haiku 4.5 — 開發 / 高頻呼叫
@@ -133,10 +133,10 @@ def friendly_error_message(exc: BaseException) -> str:
         return f"LLM 服務暫時不可用（{etype}）"
     return f"LLM 呼叫失敗（{etype}）"
 
-# [b] 主備援順序：openai → gemini → anthropic → cohere
-# anthropic 排在 gemini 之後：先消耗免費 Gemini 額度，再用付費 Claude 額度。
-# 若要把 Claude 提到第二順位，將 "anthropic" 移到 "gemini" 前即可。
-_AUTO_DETECT_ORDER = ["openai", "gemini", "anthropic", "cohere"]
+# [b] 主備援順序：gemini → openai → anthropic → cohere
+# gemini 排第一：優先消耗免費額度；openai / anthropic 為付費後備。
+# 若要把 OpenAI 提回第一順位，將 "openai" 移到 "gemini" 前即可。
+_AUTO_DETECT_ORDER = ["gemini", "openai", "anthropic", "cohere"]
 
 # [f] 鑰匙解析統一走 src.core.secrets：
 #   1. GCP_SECRET_PROJECT 有設 → 先查 Secret Manager

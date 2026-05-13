@@ -128,7 +128,7 @@ Boilerplate filtering (two layers):
 
 ### LLM Backend (`src/core/llm_client.py`)
 
-Single `chat(prompt, max_tokens, mode)` entrypoint. Four active backends — auto-detect order: `openai → gemini → anthropic → cohere`. `mode="dev"` uses cheaper/faster models; `mode="demo"` uses best quality.
+Single `chat(prompt, max_tokens, mode)` entrypoint. Four active backends — auto-detect order: `gemini → openai → anthropic → cohere` (free Gemini first, then paid OpenAI / Claude). `mode="dev"` uses cheaper/faster models; `mode="demo"` uses best quality.
 
 Models (2026-05): OpenAI `gpt-5` / `gpt-5-mini`, Gemini `gemini-2.5-flash`, Anthropic `claude-sonnet-4-6` / `claude-haiku-4-5-20251001`, Cohere `command-r-plus-08-2024`. Verified against live `models.list()` on 2026-05-08; the previous `gpt-5o` / `gemini-3.0-flash` names returned 404 and have been corrected.
 

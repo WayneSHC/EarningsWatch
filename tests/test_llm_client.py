@@ -7,7 +7,7 @@ Coverage targets the multi-backend cascade:
   - Empty prompt rejection
   - set_backend / available_backends
 
-Active backends: openai → gemini → anthropic → cohere
+Active backends: gemini → openai → anthropic → cohere
 Removed: groq (no API key)
 
 Tests leave ANTHROPIC_API_KEY unset by default (conftest) so the auto-detect
@@ -31,17 +31,17 @@ class TestDetectBackend:
         assert lc._detect_backend() == "gemini"
 
     def test_auto_detect_follows_order(self, monkeypatch):
-        # Conftest sets openai/gemini. _AUTO_DETECT_ORDER starts with openai.
+        # Conftest sets openai/gemini. _AUTO_DETECT_ORDER starts with gemini.
         monkeypatch.delenv("LLM_BACKEND", raising=False)
-        lc._detect_backend.cache_clear()
-        assert lc._detect_backend() == "openai"
-
-    def test_auto_detect_skips_missing_keys(self, monkeypatch):
-        # Wipe openai → gemini wins (next in order)
-        monkeypatch.delenv("LLM_BACKEND", raising=False)
-        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
         lc._detect_backend.cache_clear()
         assert lc._detect_backend() == "gemini"
+
+    def test_auto_detect_skips_missing_keys(self, monkeypatch):
+        # Wipe gemini → openai wins (next in order)
+        monkeypatch.delenv("LLM_BACKEND", raising=False)
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        lc._detect_backend.cache_clear()
+        assert lc._detect_backend() == "openai"
 
     def test_explicit_invalid_falls_back(self, monkeypatch, capsys):
         monkeypatch.setenv("LLM_BACKEND", "no_such_backend")
@@ -101,39 +101,39 @@ class TestChatCascade:
         monkeypatch.setattr(lc, "_dispatch", fake_dispatch)
         out = lc.chat("ping")
         assert out == "Pong."
-        assert calls == ["openai"]   # only the primary, no cascade
+        assert calls == ["gemini"]   # only the primary, no cascade
 
     def test_quota_marker_triggers_fallback(self, monkeypatch, capsys):
         attempts = []
 
         def fake_dispatch(backend, prompt, model, max_tokens):
             attempts.append(backend)
-            if backend == "openai":
+            if backend == "gemini":
                 # Pure quota error (no "429" → that hits rate-limit branch instead)
                 raise RuntimeError("RESOURCE_EXHAUSTED: quota exceeded")
             return f"reply from {backend}", 0, 0
 
         monkeypatch.setattr(lc, "_dispatch", fake_dispatch)
         out = lc.chat("hello")
-        assert out == "reply from gemini"
-        assert attempts == ["openai", "gemini"]
+        assert out == "reply from openai"
+        assert attempts == ["gemini", "openai"]
         captured = capsys.readouterr().out
         # New friendly message format
-        assert "OpenAI" in captured and ("配額" in captured or "token" in captured)
+        assert "Gemini" in captured and ("配額" in captured or "token" in captured)
 
     def test_credit_balance_marker_triggers_fallback(self, monkeypatch):
         attempts = []
 
         def fake_dispatch(backend, prompt, model, max_tokens):
             attempts.append(backend)
-            if backend == "openai":
+            if backend == "gemini":
                 raise RuntimeError("Your credit balance is too low")
             return "ok", 0, 0
 
         monkeypatch.setattr(lc, "_dispatch", fake_dispatch)
         out = lc.chat("hi")
         assert out == "ok"
-        assert attempts[0] == "openai"
+        assert attempts[0] == "gemini"
         assert len(attempts) >= 2
 
     def test_404_marker_triggers_fallback(self, monkeypatch):
@@ -141,14 +141,14 @@ class TestChatCascade:
 
         def fake_dispatch(backend, prompt, model, max_tokens):
             attempts.append(backend)
-            if backend == "openai":
+            if backend == "gemini":
                 raise RuntimeError("404 NOT_FOUND model_not_found")
             return "ok", 0, 0
 
         monkeypatch.setattr(lc, "_dispatch", fake_dispatch)
         out = lc.chat("hi")
         assert out == "ok"
-        assert attempts[0] == "openai"
+        assert attempts[0] == "gemini"
         assert len(attempts) >= 2
 
     def test_503_marker_triggers_fallback(self, monkeypatch):
@@ -156,7 +156,7 @@ class TestChatCascade:
 
         def fake_dispatch(backend, prompt, model, max_tokens):
             attempts.append(backend)
-            if backend == "openai":
+            if backend == "gemini":
                 raise RuntimeError("503 service unavailable")
             return "ok", 0, 0
 
@@ -170,7 +170,7 @@ class TestChatCascade:
 
         def fake_dispatch(backend, prompt, model, max_tokens):
             attempts.append(backend)
-            if backend == "openai":
+            if backend == "gemini":
                 raise RuntimeError("429 Too Many Requests: rate limit reached")
             return "ok", 0, 0
 
@@ -190,7 +190,7 @@ class TestChatCascade:
         monkeypatch.setattr(lc, "_dispatch", fake_dispatch)
         with pytest.raises(RuntimeError, match="JSON schema"):
             lc.chat("hi")
-        assert attempts == ["openai"]
+        assert attempts == ["gemini"]
 
     def test_all_backends_fail_raises_llm_unavailable(self, monkeypatch):
         """
@@ -233,13 +233,13 @@ class TestBackendManagement:
 
     def test_available_backends_respects_order(self):
         out = lc.available_backends()
-        assert out == ["openai", "gemini"]
+        assert out == ["gemini", "openai"]
 
     def test_set_backend_clears_cache(self, monkeypatch):
         lc._detect_backend.cache_clear()
-        assert lc._detect_backend() == "openai"
-        lc.set_backend("gemini")
         assert lc._detect_backend() == "gemini"
+        lc.set_backend("openai")
+        assert lc._detect_backend() == "openai"
 
     def test_set_backend_rejects_unknown(self):
         with pytest.raises(ValueError, match="未知後端"):
@@ -286,7 +286,7 @@ def test_quota_marker_recognized(monkeypatch, err_msg):
 
     def fake_dispatch(backend, prompt, model, max_tokens):
         attempts.append(backend)
-        if backend == "openai":
+        if backend == "gemini":
             raise RuntimeError(err_msg)
         return "ok", 0, 0
 
