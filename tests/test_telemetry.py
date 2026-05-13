@@ -143,7 +143,7 @@ class TestLLMClientIntegration:
 
     def test_fallback_records_both_failure_and_success(self, monkeypatch):
         def fake_dispatch(backend, prompt, model, max_tokens):
-            if backend == "openai":
+            if backend == "gemini":
                 raise RuntimeError("quota exceeded")
             return "ok", 8, 3
 
