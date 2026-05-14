@@ -42,7 +42,7 @@ st.set_page_config(
     page_title="EarningsWatch｜法說會一致性審計",
     page_icon="🕵️",
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="auto",  # 手機自動收合、桌機展開
 )
 
 st.markdown(CUSTOM_CSS, unsafe_allow_html=True)

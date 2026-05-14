@@ -128,6 +128,97 @@ hr {
     background-color: #F8F9FA !important;
     border-radius: 8px !important;
 }
+
+/* ───────────────────────── RWD：mobile (≤768px) ─────────────────────────
+   Streamlit 在窄螢幕下不一定會自動把 st.columns 堆疊，且 metric / tab /
+   卡片字級在手機上偏大。下面用媒體查詢強制堆疊欄位、縮字、橫向捲動 tab，
+   以及限制圖表 / 動畫寬度，避免整頁水平捲動。Desktop 完全不受影響。 */
+@media (max-width: 768px) {
+    /* 主容器內距收緊，避免兩側留白吃掉內容空間 */
+    .main .block-container,
+    [data-testid="stAppViewContainer"] .main .block-container {
+        padding-left: 0.75rem !important;
+        padding-right: 0.75rem !important;
+        padding-top: 1rem !important;
+    }
+
+    /* st.columns 在手機強制單欄堆疊。
+       針對 stHorizontalBlock 的 flex 容器，把每個 column 拉到 100%。 */
+    [data-testid="stHorizontalBlock"] {
+        flex-wrap: wrap !important;
+        gap: 0.5rem !important;
+    }
+    [data-testid="stHorizontalBlock"] > [data-testid="stColumn"],
+    [data-testid="stHorizontalBlock"] > div[data-testid^="column"] {
+        flex: 0 0 100% !important;
+        width: 100% !important;
+        min-width: 100% !important;
+    }
+
+    /* 標題縮小避免換行過多佔版面 */
+    h1 { font-size: 1.5rem !important; }
+    h2 { font-size: 1.25rem !important; }
+    h3 { font-size: 1.1rem !important; }
+    h4 { font-size: 1rem !important; }
+
+    /* st.metric 數值字體縮小 */
+    [data-testid="stMetricValue"] {
+        font-size: 1.4rem !important;
+    }
+    [data-testid="stMetricLabel"] {
+        font-size: 0.8rem !important;
+    }
+
+    /* Tabs 列在手機可能塞不下，允許橫向捲動而非折行 */
+    [data-testid="stTabs"] [role="tablist"] {
+        overflow-x: auto !important;
+        flex-wrap: nowrap !important;
+        scrollbar-width: thin;
+        -webkit-overflow-scrolling: touch;
+    }
+    [data-testid="stTabs"] [role="tab"] {
+        flex-shrink: 0 !important;
+        white-space: nowrap !important;
+        font-size: 0.9rem !important;
+        padding: 0.4rem 0.7rem !important;
+    }
+
+    /* 卡片內距收緊 */
+    .contradiction-card,
+    .ok-card {
+        padding: 12px 14px !important;
+        font-size: 14px !important;
+    }
+    .step-log {
+        font-size: 12px !important;
+        padding: 8px 10px !important;
+        word-break: break-word;
+    }
+
+    /* Primary / secondary button 在手機縮小 padding，避免換行 */
+    [data-testid="baseButton-primary"],
+    [data-testid="baseButton-secondary"] {
+        padding: 8px 16px !important;
+        font-size: 14px !important;
+    }
+
+    /* 無限載入動畫 SVG 在手機縮放，避免水平捲動 */
+    [data-testid="stMarkdownContainer"] svg {
+        max-width: 100% !important;
+        height: auto !important;
+    }
+
+    /* DataFrame 在手機允許水平捲動而非壓縮欄寬 */
+    [data-testid="stDataFrame"] {
+        overflow-x: auto !important;
+    }
+
+    /* Sidebar 開啟時佔滿全寬，避免和主內容擠在一起 */
+    [data-testid="stSidebar"] {
+        min-width: 85vw !important;
+        max-width: 85vw !important;
+    }
+}
 </style>
 """
 
