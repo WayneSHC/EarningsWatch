@@ -200,7 +200,10 @@ def decide_tools(query: str, topic: str) -> list[str]:
     try:
         raw = llm_chat(prompt, max_tokens=150)
         parsed = _extract_json(raw)
-        if isinstance(parsed, dict):
+        # [b] _extract_json returns a contradiction-detection fallback dict on parse failure
+        # (no "tools" key) — require the key to confirm the LLM actually answered our schema,
+        # otherwise fall through to keyword routing.
+        if isinstance(parsed, dict) and "tools" in parsed:
             tools_raw = parsed.get("tools", [])
             valid = {t["name"] for t in TOOL_SPECS}
             tools = [t for t in tools_raw if isinstance(t, str) and t in valid]
