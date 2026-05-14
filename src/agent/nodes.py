@@ -58,12 +58,15 @@ _NEWS_BOILERPLATE = (
 )
 
 
-def _clean_news_snippet(text: str, max_len: int = 200) -> str:
+def _clean_news_snippet(text: str, max_len: int = 180) -> str:
     if not text:
         return ""
     if any(p in text for p in _NEWS_BOILERPLATE):
         return ""
-    cleaned = re.sub(r"[#*`>]+", " ", text)
+    # [b] 擴大過濾範圍：除了 # * ` >，再加上 = ~ _ 與 setext heading 用的 ---/===，
+    #     並把 [] () 也洗掉避免被當 markdown link 殘骸。Readmo.ai 之類的爬蟲頁面
+    #     會把標題、麵包屑、按鈕文字全部塞進 content，混雜大量結構字元。
+    cleaned = re.sub(r"[#*`>=~_\[\]]+", " ", text)
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
     return cleaned[:max_len]
 
@@ -846,20 +849,24 @@ def report_generator(state: AgentState) -> dict:
         # 把新聞提前到主要位置呈現，並附上摘要片段。
         if news:
             sections.append("## 一、網路新聞補充")
+            sections.append("")  # [b] 與標題隔一個空行，確保下方 list 起始乾淨
             for n in news[:5]:
                 raw_url = str(n.get("url", ""))
                 safe_url = raw_url if raw_url.startswith(("https://", "http://")) else ""
                 title = re.sub(r"[\[\]()]", "", str(n.get("title", "")))
                 pub = n.get("published_date", "")
-                if safe_url:
-                    sections.append(f"- [{title}]({safe_url})" + (f" — {pub}" if pub else ""))
-                else:
-                    sections.append(f"- {title}" + (f" — {pub}" if pub else ""))
+                # [b] 標題與摘要用「軟換行」（行尾兩空白）接成同一個 list item paragraph，
+                #     避免 4-space 縮排在某些 markdown renderer 被當 indented code block，
+                #     CJK 字體就會被放大成像 heading 的尺寸（這次 Readmo.ai 那則的成因）。
+                head_line = (
+                    f"- [{title}]({safe_url})" if safe_url else f"- {title}"
+                ) + (f" — {pub}" if pub else "")
                 snippet = _clean_news_snippet(str(n.get("content", "")))
-                # [b] 用單行縮排取代 blockquote：blockquote 內部仍會解析 markdown，
-                #     即使 _he 轉義過 <>，殘留的 # 字元仍會被當 heading 渲染。
                 if snippet:
-                    sections.append(f"    {_he(snippet)}")
+                    sections.append(head_line + "  ")  # trailing 2 spaces = hard break
+                    sections.append(f"  {_he(snippet)}")  # 2-space indent = paragraph continuation
+                else:
+                    sections.append(head_line)
             sections.append("")
         else:
             sections.append("> 網路新聞搜尋也未取得結果，建議調整查詢主題或關鍵字。")
