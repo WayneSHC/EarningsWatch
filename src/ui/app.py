@@ -29,7 +29,7 @@ bridge_to_env("LANGSMITH_API_KEY")
 import streamlit as st
 
 # UI 子模組（純函數、無 session 耦合）
-from src.ui.styles import CUSTOM_CSS, INFINITY_SPINNER_HTML
+from src.ui.styles import CUSTOM_CSS
 from src.ui.auth import require_password
 from src.ui.cache import get_cached_result, save_to_cache
 from src.ui.state import UIState
@@ -271,22 +271,17 @@ if run_btn:
     if compare_mode and len(selected_companies) >= 2:
         from src.core.comparison import run_multi_company
 
-        _multi_spinner = st.empty()
-        _multi_spinner.markdown(
-            INFINITY_SPINNER_HTML.format(
-                text=f"並行分析　{' ＋ '.join(selected_companies)}　（需 30–90 秒）…"
-            ),
-            unsafe_allow_html=True,
-        )
         try:
-            multi_results = run_multi_company(
-                companies=selected_companies,
-                topic=topic,
-                quarters=quarters,
-                custom_query=custom_query.strip(),
-            )
+            with st.spinner(
+                f"並行分析　{' ＋ '.join(selected_companies)}　（需 30–90 秒）…"
+            ):
+                multi_results = run_multi_company(
+                    companies=selected_companies,
+                    topic=topic,
+                    quarters=quarters,
+                    custom_query=custom_query.strip(),
+                )
         except Exception as e:
-            _multi_spinner.empty()  # 發生錯誤時立即清除動畫
             # [f] 不對使用者顯示 str(e)，避免洩漏 API key 片段或內部路徑
             from src.core.llm_client import friendly_error_message
             _etype = type(e).__name__
@@ -294,8 +289,6 @@ if run_btn:
             print(f"[UI] 多公司分析失敗: {_etype}: {e}")
             st.error(f"多公司分析失敗：{_msg}")
             st.stop()
-        finally:
-            _multi_spinner.empty()  # 無論成功失敗都清除動畫
 
         # 儲存至 UIState，供重渲染時使用
         ui.multi_results = multi_results
@@ -318,12 +311,6 @@ if run_btn:
             result = cached
         else:
             # 真實執行 Agent
-            # 顯示無限動畫 spinner（取代原本的 progress_bar）
-            _agent_spinner = st.empty()
-            _agent_spinner.markdown(
-                INFINITY_SPINNER_HTML.format(text="AI Agent 分析中，請稍候…"),
-                unsafe_allow_html=True,
-            )
             step_container = st.expander("🤖 Agent 思考步驟（即時更新）", expanded=True)
 
             try:
@@ -367,33 +354,31 @@ if run_btn:
                 accumulated_state = dict(initial_state)
                 accumulated_state["node_timings"] = {}
                 _prev_node_time = time.time()
-                for step in agent.stream(initial_state, stream_mode="updates"):
-                    for node_name, node_output in step.items():
-                        _now = time.time()
-                        accumulated_state["node_timings"][node_name] = round(_now - _prev_node_time, 1)
-                        _prev_node_time = _now
-                        name_zh, prog = NODE_NAMES.get(node_name, (node_name, 5))
-                        # [移除 progress_bar，改由 infinity spinner 持續顯示]
-                        new_steps = node_output.get("steps_log", [])
-                        all_steps.extend(new_steps)
-                        # [f] html.escape 防 XSS：steps_log 可能含 LLM 回傳的 change_detail
-                        steps_md = "\n\n".join(
-                            f'<div class="step-log">{html.escape(s)}</div>'
-                            for s in all_steps
-                        )
-                        steps_placeholder.markdown(steps_md, unsafe_allow_html=True)
-                        for k, v in node_output.items():
-                            if k == "steps_log":
-                                accumulated_state["steps_log"] = all_steps
-                            else:
-                                accumulated_state[k] = v
+                with st.spinner("AI Agent 分析中，請稍候…"):
+                    for step in agent.stream(initial_state, stream_mode="updates"):
+                        for node_name, node_output in step.items():
+                            _now = time.time()
+                            accumulated_state["node_timings"][node_name] = round(_now - _prev_node_time, 1)
+                            _prev_node_time = _now
+                            name_zh, prog = NODE_NAMES.get(node_name, (node_name, 5))
+                            new_steps = node_output.get("steps_log", [])
+                            all_steps.extend(new_steps)
+                            # [f] html.escape 防 XSS：steps_log 可能含 LLM 回傳的 change_detail
+                            steps_md = "\n\n".join(
+                                f'<div class="step-log">{html.escape(s)}</div>'
+                                for s in all_steps
+                            )
+                            steps_placeholder.markdown(steps_md, unsafe_allow_html=True)
+                            for k, v in node_output.items():
+                                if k == "steps_log":
+                                    accumulated_state["steps_log"] = all_steps
+                                else:
+                                    accumulated_state[k] = v
 
                 result = accumulated_state
-                _agent_spinner.empty()  # Agent 完成後清除動畫
                 save_to_cache(company, topic, result, quarters, custom_query.strip())
 
             except Exception as e:
-                _agent_spinner.empty()  # [b] 例外發生時確保動畫清除，不讓 UI 停在 loading 狀態
                 # [f] 不對使用者顯示 str(e)，避免洩漏 API key 片段或內部路徑
                 from src.core.llm_client import friendly_error_message, LLMUnavailableError
                 _etype = type(e).__name__
