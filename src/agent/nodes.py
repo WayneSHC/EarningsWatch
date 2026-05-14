@@ -783,10 +783,21 @@ def report_generator(state: AgentState) -> dict:
         c["analysis"].get("has_contradiction") for c in contradictions
     )
     sections.append("## 一、跨季發言比對")
+    # [b] 與「矛盾詳情」tab 一致：隱藏 stance_change=="無關" 的比對組，
+    # 這些通常代表兩季沒有討論同一主題，列出來只是雜訊。
+    relevant_contradictions = [
+        c for c in contradictions
+        if c.get("analysis", {}).get("stance_change") != "無關"
+    ]
+    hidden_count = len(contradictions) - len(relevant_contradictions)
     if not contradictions:
         sections.append("> 資料不足，無法完成跨季比對（請確認已匯入多季法說會）")
+    elif not relevant_contradictions:
+        sections.append("> 所有比對組均判定為主題無關，請嘗試更換建議主題或縮小季度範圍。")
     else:
-        for c in contradictions:
+        if hidden_count:
+            sections.append(f"> _已隱藏 {hidden_count} 組主題無關的比對_")
+        for c in relevant_contradictions:
             a = c["analysis"]
             icon = "🚨" if a.get("has_contradiction") else "✅"
             sections.append(
