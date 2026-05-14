@@ -798,8 +798,12 @@ def report_generator(state: AgentState) -> dict:
                 sections.append("")
 
     # [A7] 主題未涵蓋判斷：direct_answer 表達「資料中未提及」時，
+    # 或知識庫完全無命中（retrieved 全空）時，
     # 跨季比對 / 承諾追蹤 / 趨勢分析在此主題下都是雜訊，改以網路新聞補充。
-    off_topic = _is_off_topic_answer(direct_answer_text)
+    # [b] 補上 `total_chunks == 0` 分支：BigQuery 對主題（如 CoPoS 未來獲利）
+    #     完全無命中時，direct_answer 不會被生成，原本判斷因此漏掉。
+    total_chunks = sum(len(v) for v in retrieved.values()) if retrieved else 0
+    off_topic = _is_off_topic_answer(direct_answer_text) or total_chunks == 0
     if off_topic:
         log.append("  ⚠ direct_answer 判定主題未涵蓋於法說會逐字稿，跳過跨季比對與承諾追蹤")
         sections.append(
