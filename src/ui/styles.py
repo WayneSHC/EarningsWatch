@@ -67,7 +67,8 @@ p, span, div {
 /* Primary Button Styling (Google Red)
    [修正] Streamlit 按鈕 DOM 使用 data-testid，不是 kind 屬性，
           必須用 [data-testid="baseButton-primary"] 才能正確選中。 */
-[data-testid="baseButton-primary"] {
+[data-testid="baseButton-primary"],
+[data-testid="stBaseButton-primary"] {
     background-color: #EA4335 !important; /* Google Red */
     color: #FFFFFF !important;            /* 純白文字，對比度 4.5:1（WCAG AA） */
     border: none !important;
@@ -81,7 +82,15 @@ p, span, div {
     box-shadow: 0 1px 2px 0 rgba(60,64,67,0.3), 0 1px 3px 1px rgba(60,64,67,0.15) !important;
 }
 
-[data-testid="baseButton-primary"]:hover {
+/* [b] Streamlit 把按鈕文字包在 <p> / <div> 子元素裡，會繼承全域 body 深色字。
+       強制子元素也用白色，避免文字看不清楚。 */
+[data-testid="baseButton-primary"] *,
+[data-testid="stBaseButton-primary"] * {
+    color: #FFFFFF !important;
+}
+
+[data-testid="baseButton-primary"]:hover,
+[data-testid="stBaseButton-primary"]:hover {
     background-color: #C5221F !important; /* Google Red Dark（hover 加深） */
     box-shadow: 0 1px 3px 0 rgba(60,64,67,0.3), 0 4px 8px 3px rgba(60,64,67,0.15) !important;
     color: #FFFFFF !important;
