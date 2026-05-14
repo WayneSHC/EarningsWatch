@@ -47,6 +47,27 @@ def _is_off_topic_answer(text: str) -> bool:
     return any(p in text for p in _OFF_TOPIC_PHRASES)
 
 
+# Tavily content 是從網頁直接刮下的 markdown，常見三類雜質：
+#  (1) `## ### #` 等 heading 符號 → 套進 blockquote 會被 Streamlit 渲染成巨大標題
+#  (2) `*` `>` `` ` `` 等其他 markdown 結構字元
+#  (3) 整段都是「請啟用 JavaScript / 更新瀏覽器」之類的 SPA fallback 文字（毫無資訊量）
+# _clean_news_snippet 過濾上述雜質，讓 off-topic 模式的新聞片段呈現一致格式。
+_NEWS_BOILERPLATE = (
+    "請更新您的瀏覽器", "請啟用 JavaScript", "請在瀏覽器上啟用", "請啟用JavaScript",
+    "更新瀏覽器", "不再受支援", "Javascript is disabled",
+)
+
+
+def _clean_news_snippet(text: str, max_len: int = 200) -> str:
+    if not text:
+        return ""
+    if any(p in text for p in _NEWS_BOILERPLATE):
+        return ""
+    cleaned = re.sub(r"[#*`>]+", " ", text)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned[:max_len]
+
+
 def _llm(prompt: str, max_tokens: int = 500) -> str:
     return llm_chat(prompt, max_tokens=max_tokens)
 
@@ -834,9 +855,11 @@ def report_generator(state: AgentState) -> dict:
                     sections.append(f"- [{title}]({safe_url})" + (f" — {pub}" if pub else ""))
                 else:
                     sections.append(f"- {title}" + (f" — {pub}" if pub else ""))
-                snippet = str(n.get("content", "")).strip().replace("\n", " ")
+                snippet = _clean_news_snippet(str(n.get("content", "")))
+                # [b] 用單行縮排取代 blockquote：blockquote 內部仍會解析 markdown，
+                #     即使 _he 轉義過 <>，殘留的 # 字元仍會被當 heading 渲染。
                 if snippet:
-                    sections.append(f"  > {_he(snippet[:200])}")
+                    sections.append(f"    {_he(snippet)}")
             sections.append("")
         else:
             sections.append("> 網路新聞搜尋也未取得結果，建議調整查詢主題或關鍵字。")
