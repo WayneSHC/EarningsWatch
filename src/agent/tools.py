@@ -5,6 +5,7 @@ Dynamic Tool Router 依問題類型選擇呼叫哪些工具。
 """
 
 import os
+from datetime import datetime, timezone
 from functools import lru_cache
 from typing import Any
 import yfinance as yf
@@ -43,13 +44,41 @@ STOCK_CODE_MAP = {
 }
 
 
+# [b] Tavily 的 published_date 多半是 ISO 8601（含 Z 或時區偏移），
+# 偶爾也會回傳純日期 'YYYY-MM-DD'。_parse_pub_date 統一回 timezone-aware datetime；
+# 失敗或缺值時回傳 datetime.min（UTC），確保排序時排到最末。
+_PUB_DATE_FALLBACK = datetime.min.replace(tzinfo=timezone.utc)
+
+
+def _parse_pub_date(s: str) -> datetime:
+    if not s:
+        return _PUB_DATE_FALLBACK
+    try:
+        # 'Z' 是 ISO 8601 的 UTC 簡寫，fromisoformat 在 3.11 已支援，
+        # 但保險起見手動替換為 '+00:00'。
+        normalized = s.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(normalized)
+        # 純日期沒有時區 → 視為 UTC，避免 naive vs aware 比較報錯。
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except (ValueError, TypeError):
+        return _PUB_DATE_FALLBACK
+
+
 def search_news(query: str, company: str, max_results: int = 5) -> list[dict]:
     """
-    Tavily 即時新聞搜尋。
+    Tavily 即時新聞搜尋（news 模式 + 時間排序）。
     若未設定 API Key，回傳空列表（不影響主流程）。
 
+    排序規則：
+      1. 主排序：published_date 由新到舊（沒有日期的排最後）
+      2. 次排序：Tavily relevance score 由高到低
+      用 stable sort 兩階段排序：先 score 再 date，最終結果以 date 為主、
+      同日期內依 relevance 細排。
+
     Returns:
-        [{"title", "content", "url", "published_date"}, ...]
+        [{"title", "content", "url", "published_date", "score"}, ...]
     """
     client = _get_tavily()
     if not client:
@@ -58,21 +87,35 @@ def search_news(query: str, company: str, max_results: int = 5) -> list[dict]:
 
     search_query = f"{company} {query} 法說會 財報"
     try:
+        # [b] topic="news" 觸發 Tavily 的新聞模式：
+        #   - 偏好近期內容、published_date 命中率較高
+        #   - days=30 把搜尋範圍限制在最近一個月，貼近「即時新聞」語意
+        # 多撈一些 candidate（max_results * 2，上限 10）給排序層挑選，
+        # 之後再裁回呼叫端要求的 max_results。
+        candidate_n = min(max(max_results * 2, max_results), 10)
         resp = client.search(
             query=search_query,
             search_depth="basic",
-            max_results=max_results,
+            topic="news",
+            days=30,
+            max_results=candidate_n,
             include_answer=False,
         )
+        raw_items = resp.get("results", []) or []
         results = []
-        for r in resp.get("results", []):
+        for r in raw_items:
             results.append({
                 "title": r.get("title", ""),
                 "content": r.get("content", "")[:500],
                 "url": r.get("url", ""),
                 "published_date": r.get("published_date", ""),
+                "score": float(r.get("score", 0.0) or 0.0),
             })
-        return results
+        # [b] 兩階段 stable sort：先依 score（次要），再依 date（主要）。
+        # Python 的 sort 是 stable，最後一次排序成為主鍵，前次排序變成 tie-breaker。
+        results.sort(key=lambda x: x["score"], reverse=True)
+        results.sort(key=lambda x: _parse_pub_date(x["published_date"]), reverse=True)
+        return results[:max_results]
     except Exception as e:
         print(f"[Tools] Tavily 搜尋失敗: {e}")
         return []
