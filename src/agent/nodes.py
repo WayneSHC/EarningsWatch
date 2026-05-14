@@ -30,6 +30,23 @@ from src.core import telemetry
 _LLM_BUDGET_USD = float(os.getenv("LLM_BUDGET_USD", "0.50"))
 
 
+# [A7] 判斷 LLM 生成的「直接回答」是否表達「法說會逐字稿未涵蓋此主題」。
+# 命中時 report_generator 跳過跨季比對 / 承諾追蹤等對 off-topic 主題無意義的區塊，
+# 並改以網路新聞做補充（必要時現場觸發 Tavily）。
+_OFF_TOPIC_PHRASES = (
+    "並未提及", "並未包含", "未提及", "未包含", "並未提供", "未提供",
+    "沒有提及", "沒有包含", "沒有任何資訊", "沒有相關資訊",
+    "並無相關", "並未涵蓋", "未涵蓋", "資料中並無", "資料中並未",
+    "無法回答", "無法從", "無相關內容", "沒有相關內容",
+)
+
+
+def _is_off_topic_answer(text: str) -> bool:
+    if not text:
+        return False
+    return any(p in text for p in _OFF_TOPIC_PHRASES)
+
+
 def _llm(prompt: str, max_tokens: int = 500) -> str:
     return llm_chat(prompt, max_tokens=max_tokens)
 
@@ -743,6 +760,7 @@ def report_generator(state: AgentState) -> dict:
     # 只使用分數最高的 chunk（retrieved 已按 score 降序），每季取前 2 筆，
     # 限制總長度避免 token 超限。
     user_query = state.get("query", "")
+    direct_answer_text = ""  # [A7] 保留供 off-topic 判斷使用
     if user_query and retrieved:
         all_chunks: list[str] = []
         for q_label in sorted(retrieved.keys()):
@@ -762,8 +780,9 @@ def report_generator(state: AgentState) -> dict:
             )
             try:
                 direct_answer = llm_chat(direct_answer_prompt, max_tokens=600, mode="demo")
+                direct_answer_text = direct_answer.strip()
                 sections.append("## 直接回答")
-                sections.append(_he(direct_answer.strip()))
+                sections.append(_he(direct_answer_text))
                 sections.append("")
                 log.append("  ✅ 直接回答段落生成完成")
             except Exception as e:
@@ -777,6 +796,59 @@ def report_generator(state: AgentState) -> dict:
                     "下方仍提供跨季比對與承諾追蹤分析，可作為參考。"
                 )
                 sections.append("")
+
+    # [A7] 主題未涵蓋判斷：direct_answer 表達「資料中未提及」時，
+    # 跨季比對 / 承諾追蹤 / 趨勢分析在此主題下都是雜訊，改以網路新聞補充。
+    off_topic = _is_off_topic_answer(direct_answer_text)
+    if off_topic:
+        log.append("  ⚠ direct_answer 判定主題未涵蓋於法說會逐字稿，跳過跨季比對與承諾追蹤")
+        sections.append(
+            "> ⚠️ **本主題未在法說會逐字稿中找到相關內容**　"
+            "跨季比對 / 承諾追蹤 / 趨勢分析在此主題下無意義，"
+            "以下改以網路新聞作為補充。"
+        )
+        sections.append("")
+        # 若先前的 tool router 未觸發 Tavily（news_context 為空），現場補一次。
+        if not news:
+            try:
+                news = search_news(user_query, company)
+                if news:
+                    log.append(f"  → 主題未涵蓋 → 現場觸發 Tavily 補強：{len(news)} 篇")
+                else:
+                    log.append("  → 主題未涵蓋 → Tavily 也未取得結果")
+            except Exception as e:
+                print(f"[Nodes] off-topic Tavily 失敗: {type(e).__name__}: {e}")
+        # 把新聞提前到主要位置呈現，並附上摘要片段。
+        if news:
+            sections.append("## 一、網路新聞補充")
+            for n in news[:5]:
+                raw_url = str(n.get("url", ""))
+                safe_url = raw_url if raw_url.startswith(("https://", "http://")) else ""
+                title = re.sub(r"[\[\]()]", "", str(n.get("title", "")))
+                pub = n.get("published_date", "")
+                if safe_url:
+                    sections.append(f"- [{title}]({safe_url})" + (f" — {pub}" if pub else ""))
+                else:
+                    sections.append(f"- {title}" + (f" — {pub}" if pub else ""))
+                snippet = str(n.get("content", "")).strip().replace("\n", " ")
+                if snippet:
+                    sections.append(f"  > {_he(snippet[:200])}")
+            sections.append("")
+        else:
+            sections.append("> 網路新聞搜尋也未取得結果，建議調整查詢主題或關鍵字。")
+            sections.append("")
+        # 股價資訊（若有）仍保留作為市場反應參考
+        if stock and "error" not in stock:
+            sections.append("## 二、股價參考")
+            sections.append(
+                f"- 現價：{stock.get('current_price')} {stock.get('currency')}　"
+                f"52週高：{stock.get('52w_high')}　52週低：{stock.get('52w_low')}　"
+                f"近期漲跌：{stock.get('recent_change_pct')}%"
+            )
+            sections.append("")
+        final_report = "\n".join(sections)
+        log.append(f"  ✅ 報告生成完成（off-topic 模式，{len(final_report)} 字）")
+        return {"final_report": final_report, "news_context": news, "steps_log": log}
 
     # 矛盾摘要
     has_contradiction = any(
