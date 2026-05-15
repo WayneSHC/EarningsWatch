@@ -3,7 +3,7 @@ src/core/llm_client.py
 統一 LLM 呼叫介面：支援四種後端，一個環境變數切換
 
 支援的後端（在 .env 設定 LLM_BACKEND）：
-  gemini    → Gemini 2.5 Flash（免費額度高）★ 主力
+  gemini    → Gemini 3.1 Flash Lite（preview，免費額度高）★ 主力
   openai    → GPT-5 / GPT-5-mini（付費）
   anthropic → Claude Sonnet 4.6 / Haiku 4.5（付費，2026-05 回歸）
   cohere    → Command R+
@@ -65,8 +65,8 @@ BACKEND_MODELS = {
         "demo": "gpt-5",                        # GPT-5 — ★ fallback 第二順位（付費）
     },
     "gemini": {
-        "dev":  "gemini-2.5-flash",
-        "demo": "gemini-2.5-flash",             # Gemini 2.5 Flash — 免費額度大 ★ fallback 第一順位
+        "dev":  "gemini-3.1-flash-lite",
+        "demo": "gemini-3.1-flash-lite",        # Gemini 3.1 Flash Lite (preview) — 免費額度大 ★ fallback 第一順位
     },
     "anthropic": {
         "dev":  "claude-haiku-4-5-20251001",    # Haiku 4.5 — 開發 / 高頻呼叫
@@ -176,7 +176,7 @@ def _detect_backend() -> str:
         "❌ 找不到任何 LLM API Key！\n"
         "請在 .env 填入以下任一個：\n"
         "  OPENAI_API_KEY     → GPT-5 / GPT-5-mini ★ 主力推薦\n"
-        "  GEMINI_API_KEY     → Gemini 2.5 Flash（免費額度大）\n"
+        "  GEMINI_API_KEY     → Gemini 3.1 Flash Lite（免費額度大）\n"
         "  ANTHROPIC_API_KEY  → Claude Sonnet 4.6 / Haiku 4.5（付費）\n"
         "  COHERE_API_KEY     → Command R+"
     )
@@ -369,7 +369,7 @@ _QUOTA_MARKERS = (
 # [b] 給使用者看的中文友善訊息（不含技術細節）
 _BACKEND_LABEL = {
     "openai": "OpenAI (GPT-5)",
-    "gemini": "Gemini 2.5 Flash",
+    "gemini": "Gemini 3.1 Flash Lite",
     "anthropic": "Anthropic Claude Sonnet 4.6",
     "cohere": "Cohere Command R+",
 }
