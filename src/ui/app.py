@@ -33,7 +33,7 @@ from src.ui.styles import CUSTOM_CSS
 from src.ui.auth import require_password
 from src.ui.cache import get_cached_result, save_to_cache
 from src.ui.state import UIState
-from src.ui.quarters import get_available_quarters
+from src.ui.quarters import get_available_quarters, get_available_quarters_union
 from src.ui.views.single import render_single_company_result
 from src.ui.views.multi import render_multi_company_result
 
@@ -94,7 +94,12 @@ with st.sidebar:
         help="預設讓 Agent 從你的問題自動推導主題；想固定就從清單選擇",
     )
     topic = "" if topic_choice == _TOPIC_AUTO else topic_choice
-    available_quarters = get_available_quarters()
+    # [b] 下拉只顯示「所選公司實際已匯入」的季度，避免使用者選到「下拉有但
+    # 該公司沒資料」的季度，導致檢索 0 chunk 走入 off-topic 分支
+    if compare_mode:
+        available_quarters = get_available_quarters_union(tuple(selected_companies))
+    else:
+        available_quarters = get_available_quarters(company)
     quarter_selection = st.multiselect(
         f"季度範圍（留空 = 全部，共 {len(available_quarters)} 季）",
         available_quarters,
