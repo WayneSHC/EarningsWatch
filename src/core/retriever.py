@@ -11,7 +11,7 @@ from google.cloud import bigquery
 
 from src.core.bq_client import get_bq_client, get_table_path
 from src.core.secrets import get_secret
-from src.ingestion.embedder import embed_texts, EMBEDDING_MODEL
+from src.ingestion.embedder import embed_query_texts, EMBEDDING_MODEL
 
 TOP_K_RETRIEVAL = 20
 TOP_K_RERANK = 5
@@ -48,7 +48,7 @@ def _get_cohere_client() -> cohere.Client | None:
     return cohere.Client(key)
 
 def embed_query(text: str) -> list[float]:
-    return embed_texts([text])[0]
+    return embed_query_texts([text])[0]
 
 def clear_retriever_cache() -> None:
     pass  # BigQuery 不需要清空本地 BM25 索引快取
@@ -85,38 +85,53 @@ def vector_search(
     vector = embed_query(_maybe_expand(query))
     
     where_clause, params_dict = _build_where_clause(company, quarters, section)
-    
-    # query_parameters
-    job_config = bigquery.QueryJobConfig(
-        query_parameters=[
-            bigquery.ArrayQueryParameter("vector", "FLOAT64", vector),
-        ]
-    )
+
+    # [b] 在 QueryJobConfig 建構時就一次性傳入完整 params list。
+    # 新版 google-cloud-bigquery 的 query_parameters property 回傳的是 list 的副本，
+    # 對它 .append() 不會反映到實際 job_config，會導致 BadRequest('parameter not found')。
+    params: list = [bigquery.ArrayQueryParameter("vector", "FLOAT64", vector)]
     if "company" in params_dict:
-        job_config.query_parameters.append(bigquery.ScalarQueryParameter("company", "STRING", params_dict["company"]))
+        params.append(bigquery.ScalarQueryParameter("company", "STRING", params_dict["company"]))
     if "quarters" in params_dict:
-        job_config.query_parameters.append(bigquery.ArrayQueryParameter("quarters", "STRING", params_dict["quarters"]))
+        params.append(bigquery.ArrayQueryParameter("quarters", "STRING", params_dict["quarters"]))
     if "section" in params_dict:
-        job_config.query_parameters.append(bigquery.ScalarQueryParameter("section", "STRING", params_dict["section"]))
+        params.append(bigquery.ScalarQueryParameter("section", "STRING", params_dict["section"]))
+    job_config = bigquery.QueryJobConfig(query_parameters=params)
 
     # [b] 把 company / quarter / section 篩選 push down 到 VECTOR_SEARCH 的 base table 子查詢，
     # 而不是在外層 WHERE 過濾。原本外層 WHERE 用裸欄位名（company / quarter / section）會 BadRequest，
     # 因為 VECTOR_SEARCH 結果把原始欄位包進 struct 叫 base，欄位需以 base.X 引用才存在。
     # 改成 pre-filter 同時順手修掉「全表 top_k=20 → 篩過後常剩 0 筆」的 recall 漏洞。
+    # [b] VECTOR_SEARCH 的限制：
+    #   1) base_table_query 不可使用 query parameter（BQ 限制） → 篩選必須放外層 WHERE
+    #   2) 外層 WHERE 須用 base.X 引用（VECTOR_SEARCH 把原始列包進 struct）
+    #   3) 為避免「全表 top_k=20 → 篩過後 0 筆」的 recall 漏洞，內層 top_k 放寬，外層再截 top_k
+    #   top_k 必須是 literal（VECTOR_SEARCH named arg 不接受 query parameter）
+    inner_k = max(int(top_k) * 20, 200)
+    base_where_parts = []
+    if company:
+        base_where_parts.append("base.company = @company")
+    if quarters:
+        base_where_parts.append("base.quarter IN UNNEST(@quarters)")
+    if section:
+        base_where_parts.append("base.section = @section")
+    base_where = " AND ".join(base_where_parts) if base_where_parts else "TRUE"
     sql = f"""
     SELECT
         base.id, base.company, base.quarter, base.section, base.content,
         base.source_file, base.source_page, base.chunk_index,
         distance
     FROM VECTOR_SEARCH(
-        (SELECT * FROM `{table_path}` WHERE {where_clause}),
+        TABLE `{table_path}`,
         'embedding',
         (SELECT @vector AS embedding),
-        top_k => @top_k,
+        top_k => {inner_k},
         distance_type => 'COSINE'
     )
+    WHERE {base_where}
+    ORDER BY distance
+    LIMIT {int(top_k)}
     """
-    job_config.query_parameters.append(bigquery.ScalarQueryParameter("top_k", "INT64", top_k))
     
     query_job = client.query(sql, job_config=job_config)
     results = query_job.result()
