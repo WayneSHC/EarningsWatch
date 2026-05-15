@@ -43,6 +43,24 @@ STOCK_CODE_MAP = {
     "台達電": "2308.TW",
 }
 
+# [f] 公司別名表：用於過濾 Tavily 回傳的新聞，確保結果確實提及該公司。
+# Tavily 對 CJK 查詢的相關性有時不夠精準，常回傳同產業但不同公司的新聞
+# （例如查台達電卻回傳 TSMC、TE Connectivity、Taiwan Mobile）。
+# 別名涵蓋：中文全稱 / 中文簡稱 / 英文名 / 股票代號。
+COMPANY_ALIASES = {
+    "台積電": ["台積電", "台積", "TSMC", "Taiwan Semiconductor", "2330"],
+    "聯發科": ["聯發科", "MediaTek", "2454"],
+    "鴻海": ["鴻海", "Foxconn", "Hon Hai", "2317"],
+    "台達電": ["台達電", "台達", "Delta Electronics", "Delta Electronic", "2308"],
+}
+
+
+def _news_mentions_company(item: dict, company: str) -> bool:
+    """檢查新聞 title + content 是否提及該公司（中英名 / 代號任一即可）。"""
+    aliases = COMPANY_ALIASES.get(company, [company])
+    haystack = f"{item.get('title', '')} {item.get('content', '')}".lower()
+    return any(alias.lower() in haystack for alias in aliases)
+
 
 # [b] Tavily 的 published_date 多半是 ISO 8601（含 Z 或時區偏移），
 # 偶爾也會回傳純日期 'YYYY-MM-DD'。_parse_pub_date 統一回 timezone-aware datetime；
@@ -111,6 +129,12 @@ def search_news(query: str, company: str, max_results: int = 5) -> list[dict]:
                 "published_date": r.get("published_date", ""),
                 "score": float(r.get("score", 0.0) or 0.0),
             })
+        # [f] 過濾掉未提及該公司的新聞（Tavily 對 CJK 查詢偶爾回傳同產業但不同公司的結果）。
+        before_n = len(results)
+        results = [r for r in results if _news_mentions_company(r, company)]
+        dropped = before_n - len(results)
+        if dropped > 0:
+            print(f"[Tools] Tavily 過濾掉 {dropped} 則未提及 {company} 的新聞")
         # [b] 兩階段 stable sort：先依 score（次要），再依 date（主要）。
         # Python 的 sort 是 stable，最後一次排序成為主鍵，前次排序變成 tie-breaker。
         results.sort(key=lambda x: x["score"], reverse=True)
