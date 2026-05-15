@@ -172,7 +172,8 @@ def render_multi_company_result(ui: UIState) -> None:
             if "error" in r:
                 st.error(f"分析失敗：{r['error']}")
             else:
-                st.markdown(r.get("final_report", "報告不可用"))
+                # [f] 同 single.py：轉義 $ 避免 Streamlit 把新聞標題裡的金額當 LaTeX 數學
+                st.markdown(r.get("final_report", "報告不可用").replace("$", r"\$"))
 
     # ── 匯出按鈕（多公司）────────────────────────────────────────────────────
     st.divider()

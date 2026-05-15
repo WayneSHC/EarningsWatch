@@ -140,7 +140,10 @@ def render_single_company_result(ui: UIState) -> None:
     )
 
     with tab_report:
-        final_report = result.get("final_report", "（報告生成中...）")
+        # [f] Streamlit markdown 會把 $...$ 當 LaTeX 數學渲染；新聞標題裡的金額（如 $572.5B）
+        #     會把整段文字吃成公式。在送進 st.markdown 前把 $ 轉義為 \$（標準 markdown 字面值）。
+        #     PDF 匯出仍用原始 final_report（fpdf2 不處理 markdown），不受影響。
+        final_report = result.get("final_report", "（報告生成中...）").replace("$", r"\$")
 
         # ── D5：建議追問摘要框（取有效立場變化的 follow_up，最多 3 條）────────
         _follow_ups = [
