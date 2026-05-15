@@ -99,19 +99,22 @@ def vector_search(
     if "section" in params_dict:
         job_config.query_parameters.append(bigquery.ScalarQueryParameter("section", "STRING", params_dict["section"]))
 
+    # [b] 把 company / quarter / section 篩選 push down 到 VECTOR_SEARCH 的 base table 子查詢，
+    # 而不是在外層 WHERE 過濾。原本外層 WHERE 用裸欄位名（company / quarter / section）會 BadRequest，
+    # 因為 VECTOR_SEARCH 結果把原始欄位包進 struct 叫 base，欄位需以 base.X 引用才存在。
+    # 改成 pre-filter 同時順手修掉「全表 top_k=20 → 篩過後常剩 0 筆」的 recall 漏洞。
     sql = f"""
-    SELECT 
-        base.id, base.company, base.quarter, base.section, base.content, 
+    SELECT
+        base.id, base.company, base.quarter, base.section, base.content,
         base.source_file, base.source_page, base.chunk_index,
         distance
     FROM VECTOR_SEARCH(
-        TABLE `{table_path}`,
+        (SELECT * FROM `{table_path}` WHERE {where_clause}),
         'embedding',
         (SELECT @vector AS embedding),
         top_k => @top_k,
         distance_type => 'COSINE'
     )
-    WHERE {where_clause}
     """
     job_config.query_parameters.append(bigquery.ScalarQueryParameter("top_k", "INT64", top_k))
     
