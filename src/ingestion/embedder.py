@@ -12,10 +12,12 @@ gemini-embedding-2 與 001 的差異：
 
 import hashlib
 import os
+import time
 from functools import lru_cache
 from typing import Any
 
 from google import genai
+from google.genai import errors as genai_errors
 from google.genai import types as genai_types
 from tqdm import tqdm
 
@@ -28,6 +30,13 @@ BATCH_SIZE = 1  # gemini-embedding-2 是多模態模型，contents 為 list 時�
                 # 必須一次傳一個文字才能得到逐筆 embedding。
 UPSERT_BATCH = 100
 
+# [b] 429/RESOURCE_EXHAUSTED 重試策略：
+#   - 每次呼叫之間 sleep _INTER_CALL_SLEEP 秒，把單機 RPM 控制在 ~100（Gemini 免費級距上限）
+#   - 命中 429 時指數退避（base 8s, factor 2x, max 3 retries），總等待 ~56s，跨越 RPM 視窗
+_INTER_CALL_SLEEP = float(os.getenv("EMBED_INTER_CALL_SLEEP", "0.6"))
+_RETRY_MAX = int(os.getenv("EMBED_RETRY_MAX", "3"))
+_RETRY_BASE_SLEEP = float(os.getenv("EMBED_RETRY_BASE_SLEEP", "8"))
+
 @lru_cache(maxsize=1)
 def _get_client() -> genai.Client:
     api_key = get_secret("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
@@ -35,6 +44,30 @@ def _get_client() -> genai.Client:
         raise RuntimeError("缺少 GEMINI_API_KEY / GOOGLE_API_KEY")
     print(f"[Embedder] 初始化 google-genai client，模型 {EMBEDDING_MODEL}...")
     return genai.Client(api_key=api_key)
+
+def _embed_once(client, batch_texts, config):
+    """單次 embed 呼叫；命中 429 時指數退避重試（最多 _RETRY_MAX 次）。"""
+    last_exc = None
+    for attempt in range(_RETRY_MAX + 1):
+        try:
+            return client.models.embed_content(
+                model=EMBEDDING_MODEL,
+                contents=batch_texts,
+                config=config,
+            )
+        except genai_errors.ClientError as exc:
+            # [b] 只對 429 / RESOURCE_EXHAUSTED 退避；其他 ClientError（401/400 等）直接拋
+            status = getattr(exc, "code", None) or getattr(exc, "status_code", None)
+            msg = str(exc)
+            is_429 = status == 429 or "RESOURCE_EXHAUSTED" in msg or "429" in msg
+            if not is_429 or attempt == _RETRY_MAX:
+                raise
+            wait = _RETRY_BASE_SLEEP * (2 ** attempt)
+            print(f"[Embedder] 429 配額觸發，{wait:.0f}s 後重試（{attempt+1}/{_RETRY_MAX}）...")
+            time.sleep(wait)
+            last_exc = exc
+    # 不會到這裡（最後一次失敗已 raise）
+    raise last_exc  # pragma: no cover
 
 def _embed(texts: list[str]) -> list[list[float]]:
     """texts 必須已套上 prompt prefix（gemini-embedding-2 無 task_type 參數）。"""
@@ -45,12 +78,11 @@ def _embed(texts: list[str]) -> list[list[float]]:
     embeddings = []
     for i in range(0, len(texts), BATCH_SIZE):
         batch_texts = texts[i:i + BATCH_SIZE]
-        resp = client.models.embed_content(
-            model=EMBEDDING_MODEL,
-            contents=batch_texts,
-            config=config,
-        )
+        resp = _embed_once(client, batch_texts, config)
         embeddings.extend([e.values for e in resp.embeddings])
+        # [c] 節流：BATCH_SIZE=1 意味每個 chunk 一次呼叫，加 sleep 維持 ~100 RPM
+        if _INTER_CALL_SLEEP > 0 and i + BATCH_SIZE < len(texts):
+            time.sleep(_INTER_CALL_SLEEP)
     return embeddings
 
 def embed_documents(texts: list[str]) -> list[list[float]]:
