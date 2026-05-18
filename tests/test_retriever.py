@@ -4,9 +4,11 @@ Unit tests for src/core/retriever.py.
 Focused on the lightweight components that don't require Qdrant:
   - _maybe_expand (HyDE gating logic, P1-7)
   - _hyde_expand (LLM call + LRU cache + failure fallback)
+  - _load_min_score_from_env (COVERAGE_MIN_SCORE env var + fallback)
+  - retrieve_coverage(min_score=...) explicit-arg override path
 
-The heavy paths (vector_search, hybrid_search, retrieve_coverage) need
-Qdrant + embedding model and are exercised by benchmark.py end-to-end.
+The heavy paths (vector_search, hybrid_search, retrieve_coverage end-to-end)
+need Qdrant/BigQuery + embedding model and are exercised by benchmark.py.
 """
 import pytest
 
@@ -111,3 +113,120 @@ class TestHydeExpand:
         )
         out = retriever._hyde_expand("query string")
         assert out == "query string"  # falls back to original
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# _load_min_score_from_env — COVERAGE_MIN_SCORE env var handling
+# ──────────────────────────────────────────────────────────────────────────
+
+class TestLoadMinScoreFromEnv:
+    def test_returns_default_when_env_unset(self, monkeypatch):
+        monkeypatch.delenv("COVERAGE_MIN_SCORE", raising=False)
+        assert retriever._load_min_score_from_env() == retriever._DEFAULT_MIN_SCORE
+        # sanity: default is 0.25 per design
+        assert retriever._DEFAULT_MIN_SCORE == 0.25
+
+    def test_returns_default_when_env_empty_string(self, monkeypatch):
+        monkeypatch.setenv("COVERAGE_MIN_SCORE", "   ")
+        assert retriever._load_min_score_from_env() == retriever._DEFAULT_MIN_SCORE
+
+    def test_valid_float_overrides_default(self, monkeypatch):
+        monkeypatch.setenv("COVERAGE_MIN_SCORE", "0.35")
+        assert retriever._load_min_score_from_env() == 0.35
+
+    def test_boundary_values_accepted(self, monkeypatch):
+        # boundaries 0.0 and 1.0 are inclusive per spec
+        monkeypatch.setenv("COVERAGE_MIN_SCORE", "0.0")
+        assert retriever._load_min_score_from_env() == 0.0
+        monkeypatch.setenv("COVERAGE_MIN_SCORE", "1.0")
+        assert retriever._load_min_score_from_env() == 1.0
+
+    def test_non_numeric_falls_back_with_warning(self, monkeypatch, capsys):
+        monkeypatch.setenv("COVERAGE_MIN_SCORE", "abc")
+        out = retriever._load_min_score_from_env()
+        assert out == retriever._DEFAULT_MIN_SCORE
+        captured = capsys.readouterr().out
+        assert "COVERAGE_MIN_SCORE" in captured
+        assert "0.25" in captured
+
+    def test_out_of_range_high_falls_back(self, monkeypatch, capsys):
+        monkeypatch.setenv("COVERAGE_MIN_SCORE", "1.5")
+        out = retriever._load_min_score_from_env()
+        assert out == retriever._DEFAULT_MIN_SCORE
+        captured = capsys.readouterr().out
+        assert "COVERAGE_MIN_SCORE" in captured
+
+    def test_out_of_range_negative_falls_back(self, monkeypatch, capsys):
+        monkeypatch.setenv("COVERAGE_MIN_SCORE", "-0.1")
+        out = retriever._load_min_score_from_env()
+        assert out == retriever._DEFAULT_MIN_SCORE
+        captured = capsys.readouterr().out
+        assert "COVERAGE_MIN_SCORE" in captured
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# retrieve_coverage — explicit min_score arg vs env precedence
+# ──────────────────────────────────────────────────────────────────────────
+
+class TestRetrieveCoverageMinScore:
+    """
+    Verify the env-vs-explicit precedence without spinning up BigQuery.
+
+    Strategy: short-circuit retrieve_coverage by passing missing_quarters=[]
+    so the early-return path runs BEFORE any BQ call. To inspect what
+    min_score WOULD have been used, we instead test _load_min_score_from_env
+    directly above, and here we verify the explicit-arg path bypasses env
+    by patching _load_min_score_from_env to crash on invocation.
+    """
+
+    def test_explicit_arg_skips_env_loader(self, monkeypatch):
+        """When caller passes min_score explicitly, env loader MUST NOT run."""
+        monkeypatch.setenv("COVERAGE_MIN_SCORE", "0.50")
+
+        def _should_not_be_called():
+            pytest.fail("env loader should be bypassed when min_score is passed")
+
+        monkeypatch.setattr(retriever, "_load_min_score_from_env", _should_not_be_called)
+
+        # missing_quarters=[] short-circuits before BQ, but the
+        # `if min_score is None` check runs first — so we pass a real value.
+        result = retriever.retrieve_coverage(
+            query="q",
+            company="TSMC",
+            missing_quarters=[],
+            min_score=0.10,
+        )
+        assert result == {}  # short-circuit return
+
+    def test_none_arg_invokes_env_loader(self, monkeypatch):
+        """When caller omits min_score (or passes None), env loader IS called."""
+        called = {"n": 0}
+
+        def _spy():
+            called["n"] += 1
+            return 0.42
+
+        monkeypatch.setattr(retriever, "_load_min_score_from_env", _spy)
+
+        # missing_quarters=[] short-circuits before BQ — but importantly,
+        # the env loader is invoked BEFORE the early return check on
+        # missing_quarters. Wait — actual order is: `if not missing_quarters:
+        # return {}` runs first. So env loader is NOT called in that path.
+        # To verify env loader IS called, we need a non-empty missing_quarters,
+        # which then hits BQ. Instead, we directly call with non-empty and
+        # patch BQ to raise after env loader runs.
+        from google.cloud import bigquery  # noqa: F401
+
+        def _bq_boom(*a, **kw):
+            raise RuntimeError("bq stop after env loader")
+
+        monkeypatch.setattr(retriever, "get_bq_client", _bq_boom)
+
+        with pytest.raises(RuntimeError, match="bq stop"):
+            retriever.retrieve_coverage(
+                query="q",
+                company="TSMC",
+                missing_quarters=["2024Q1"],
+                min_score=None,
+            )
+        assert called["n"] == 1

@@ -19,6 +19,37 @@ TOP_K_RERANK = 5
 _HYDE_ENABLED = os.getenv("LLM_HYDE_ENABLED", "false").strip().lower() in ("true", "1", "yes")
 _HYDE_MIN_QUERY_LEN = 6
 
+# coverage sweep 相似度門檻：低於此分的 chunk 不會被補回缺漏季度。
+# 可由環境變數 COVERAGE_MIN_SCORE 覆寫；非法值會 fallback 至預設並印警告（不 raise）。
+_DEFAULT_MIN_SCORE = 0.25
+
+
+def _load_min_score_from_env() -> float:
+    """讀取 COVERAGE_MIN_SCORE 環境變數；缺漏或非法時回傳 _DEFAULT_MIN_SCORE。
+
+    Returns:
+        float in [0.0, 1.0]. 永不 raise — retrieval 是核心讀路徑，
+        環境變數打錯不該整個服務掛掉，給安全預設並印警告即可。
+    """
+    raw = os.getenv("COVERAGE_MIN_SCORE")
+    if raw is None or raw.strip() == "":
+        return _DEFAULT_MIN_SCORE
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        print(
+            f"[Retriever] ⚠ COVERAGE_MIN_SCORE={raw!r} 不是合法 float，"
+            f"fallback 至預設 {_DEFAULT_MIN_SCORE}"
+        )
+        return _DEFAULT_MIN_SCORE
+    if not (0.0 <= val <= 1.0):
+        print(
+            f"[Retriever] ⚠ COVERAGE_MIN_SCORE={val} 超出 [0.0, 1.0] 區間，"
+            f"fallback 至預設 {_DEFAULT_MIN_SCORE}"
+        )
+        return _DEFAULT_MIN_SCORE
+    return val
+
 @lru_cache(maxsize=128)
 def _hyde_expand(query: str) -> str:
     from src.core.llm_client import chat as _llm_chat
@@ -210,16 +241,24 @@ def retrieve_coverage(
     company: str,
     missing_quarters: list[str],
     top_k_per_quarter: int = 2,
-    min_score: float = 0.25,
+    min_score: float | None = None,
     max_quarters: int = 8,
     use_rerank: bool = True,
 ) -> dict[str, list[dict]]:
     """
     利用 BigQuery SQL 的 PARTITION BY 一次撈取所有 missing_quarters 的 Top-K，
     簡化過去迴圈多次呼叫 SQL 的邏輯。
+
+    Args:
+        min_score: 相似度下限（cosine similarity）。
+            預設 None → 讀環境變數 COVERAGE_MIN_SCORE，缺漏或非法則用
+            _DEFAULT_MIN_SCORE (0.25)。顯式傳入時無視環境變數。
     """
     if not missing_quarters:
         return {}
+
+    if min_score is None:
+        min_score = _load_min_score_from_env()
 
     if len(missing_quarters) > max_quarters:
         missing_quarters = sorted(missing_quarters)[-max_quarters:]
