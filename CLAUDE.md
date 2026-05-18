@@ -93,7 +93,7 @@ The conditional edge `reflect → retrieve` (retry) or `reflect → report` (end
 
 ### Coverage Sweep (`src/core/retriever.py`)
 
-After the initial top-k retrieval, `parallel_retrieval` calls `get_company_quarters()` (Qdrant facet API) then `retrieve_coverage()` for any quarters missing from the result set. Coverage sweep uses a shared embedding vector and applies a `min_score=0.25` gate to skip quarters with no relevant content.
+After the initial top-k retrieval, `parallel_retrieval` calls `get_company_quarters()` (Qdrant facet API) then `retrieve_coverage()` for any quarters missing from the result set. Coverage sweep uses a shared embedding vector and applies a `min_score` gate (default `0.25`, configurable via `COVERAGE_MIN_SCORE` env var; non-float / out-of-range values fall back to default with a warning) to skip quarters with no relevant content.
 
 ### Self-Reflection Feedback Loop (`src/agent/nodes.py:self_reflect`)
 
@@ -205,6 +205,7 @@ LLM_BACKEND=openai       # force a specific backend (openai / gemini / cohere)
 QDRANT_URL=...           # Qdrant Cloud URL (omit for local Docker)
 QDRANT_API_KEY=...       # Qdrant Cloud key
 LLAMA_CLOUD_API_KEY=...  # enables LlamaParse for table-heavy PDFs
+COVERAGE_MIN_SCORE=0.25  # coverage sweep cosine-similarity gate; non-float / out-of-range → fallback to 0.25 with warning
 ```
 
 ## PDF Ingestion Filename Conventions
