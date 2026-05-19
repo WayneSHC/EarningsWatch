@@ -383,3 +383,81 @@ class TestDetectPromises:
         cd.detect_promises(data, "AI")
         # No task generated for Q1→Q2 because Q1 chunks is empty
         assert called["n"] == 0
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# _verify_quote — Evidence Verifier (exact + fuzzy + miss)
+# ──────────────────────────────────────────────────────────────────────────
+
+class TestVerifyQuote:
+    def test_exact_substring_match(self):
+        source = "本季毛利率提升至 53%，主因為 N3 良率改善與產品組合優化。"
+        quote = "本季毛利率提升至 53%"
+        verified, is_fuzzy = cd._verify_quote(quote, source)
+        assert verified is True
+        assert is_fuzzy is False
+
+    def test_short_quote_passes_without_verification(self):
+        """Quotes shorter than _MIN_QUOTE_LEN (10 chars) auto-pass."""
+        source = "完全不相關的內容"
+        quote = "短句"  # < 10 chars
+        verified, is_fuzzy = cd._verify_quote(quote, source)
+        assert verified is True
+        assert is_fuzzy is False
+
+    def test_fully_hallucinated_quote_fails(self):
+        source = "台積電本季營運表現符合預期，AI 需求動能延續。"
+        quote = "我們將在 2030 年於火星建立晶圓廠"  # Completely fabricated
+        verified, is_fuzzy = cd._verify_quote(quote, source)
+        assert verified is False
+        assert is_fuzzy is False
+
+    def test_fuzzy_match_with_minor_punctuation_diff(self):
+        """Quote with whitespace / punctuation tweaks should fuzzy-match."""
+        source = "AI 帶動的資料中心需求成長強勁，預期將延續至明年。"
+        # Drop punctuation but keep almost identical wording
+        quote = "AI帶動的資料中心需求成長強勁 預期將延續至明年"
+        verified, is_fuzzy = cd._verify_quote(quote, source)
+        assert verified is True
+        assert is_fuzzy is True
+
+    def test_empty_quote_returns_false(self):
+        verified, is_fuzzy = cd._verify_quote("", "some source text")
+        assert verified is False
+        assert is_fuzzy is False
+
+    def test_empty_source_returns_false(self):
+        verified, is_fuzzy = cd._verify_quote("一段較長的引文內容", "")
+        assert verified is False
+        assert is_fuzzy is False
+
+    def test_verification_failure_drops_confidence_and_clears_quote(
+            self, monkeypatch):
+        """batch_detect must clear hallucinated evidence and dock confidence."""
+        def fake_chat(*a, **kw):
+            return json.dumps({
+                "same_topic": True,
+                "stance_change": "更樂觀",
+                "has_contradiction": True,
+                "change_detail": "改變",
+                "evidence_early": "完全虛構的引文XYZ12345",
+                "evidence_later": "本季毛利率提升至 53%",
+                "follow_up_question": "?",
+                "confidence": 0.8,
+            })
+        monkeypatch.setattr(cd, "llm_chat", fake_chat)
+        monkeypatch.setenv("LLM_PAIR_WORKERS", "1")
+
+        data = {
+            "2024Q1": [make_chunk("法說會 2024Q1 內容毫不相關的真實片段", "2024Q1")],
+            "2024Q2": [make_chunk("本季毛利率提升至 53%，主因為良率改善。", "2024Q2")],
+        }
+        results = cd.batch_detect(data, "毛利率")
+        assert len(results) == 1
+        analysis = results[0]["analysis"]
+        # Hallucinated early evidence cleared, real later evidence retained
+        assert analysis["evidence_early"] == ""
+        assert analysis["evidence_later"] != ""
+        # confidence docked by 0.2 (0.8 → 0.6) and flagged
+        assert analysis["verification_failed"] is True
+        assert analysis["confidence"] == pytest.approx(0.6, abs=0.01)
