@@ -20,8 +20,12 @@ import pytest
 # Lazy import so we can monkeypatch _PROJECT_ROOT-derived paths if needed
 @pytest.fixture
 def ingest_mod():
-    """Import scripts/run_ingestion.py as a module."""
-    project_root = Path("/Users/shihhuichi/Desktop/GA261_Project/Personal/EarningsWatch/.claude/worktrees/relaxed-kowalevski-61e1cb")
+    """Import scripts/run_ingestion.py as a module.
+
+    Derives the path from this test file's location so it works on any
+    machine / CI runner — never hardcode absolute paths.
+    """
+    project_root = Path(__file__).resolve().parent.parent
     scripts_dir = project_root / "scripts"
     if str(scripts_dir) not in sys.path:
         sys.path.insert(0, str(scripts_dir))
