@@ -25,6 +25,38 @@ jobs:
           GITLEAKS_ENABLE_UPLOAD_ARTIFACT: "false"
           GITLEAKS_ENABLE_SUMMARY: "true"
 
+  spec-check:
+    # Lightweight gate that enforces OpenSpec hygiene on every PR:
+    #   1. openspec validate --all     — structural correctness of every spec
+    #   2. check_spec_drift.py         — every src/scripts path the specs
+    #                                    reference must still exist on disk
+    # Runs in parallel with secret-scan; doesn't block `test`.
+    name: OpenSpec Validate + Drift Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install OpenSpec CLI
+        run: npm install -g @fission-ai/openspec@1.3.1
+
+      - name: Validate all specs structurally
+        run: openspec validate --specs
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Check spec ↔ code drift (path references)
+        # Pure-stdlib script: no pip install needed.
+        run: python scripts/check_spec_drift.py
+
   test:
     name: Compile + Unit Tests
     runs-on: ubuntu-latest
