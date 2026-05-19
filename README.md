@@ -7,7 +7,8 @@
 [![Streamlit](https://img.shields.io/badge/Streamlit-1.56-red)](https://streamlit.io/)
 [![LangGraph](https://img.shields.io/badge/LangGraph-1.1-green)](https://langchain-ai.github.io/langgraph/)
 [![BigQuery](https://img.shields.io/badge/BigQuery-Vector%20Search-blue)](https://cloud.google.com/bigquery)
-[![Vertex AI](https://img.shields.io/badge/Vertex%20AI-Embedding-orange)](https://cloud.google.com/vertex-ai)
+[![Gemini Embedding](https://img.shields.io/badge/Gemini-embedding--2-orange)](https://ai.google.dev/gemini-api/docs/embeddings)
+[![OpenSpec](https://img.shields.io/badge/Spec-OpenSpec-purple)](https://github.com/Fission-AI/OpenSpec)
 
 ---
 
@@ -21,7 +22,7 @@ EarningsWatch 透過 **7 節點 LangGraph RAG Agent** 自動分析上市公司�
 - **多公司比較**：並行分析最多 3 家公司，生成跨公司對照表
 - **Self-Reflection**：Agent 自動評估信心度，不足則重查（最多 3 輪）
 - **🎤 語音輸入**：自訂查詢欄位支援瀏覽器原生 Web Speech API
-- **☁ Serverless 後端**：向量庫遷移至 BigQuery Vector Search + Vertex AI Embedding，免維護 Docker / Qdrant
+- **☁ Serverless 後端**：向量庫遷移至 BigQuery Vector Search + Gemini Embedding，免維護 Docker / Qdrant
 
 ---
 
@@ -29,6 +30,11 @@ EarningsWatch 透過 **7 節點 LangGraph RAG Agent** 自動分析上市公司�
 
 | 日期 | 主題 |
 |---|---|
+| 2026-05-19 | 採用 [OpenSpec](https://github.com/Fission-AI/OpenSpec) 管理規格變更；`COVERAGE_MIN_SCORE` 環境變數可調 coverage sweep 門檻（#26）|
+| 2026-05-17 | Embedder 升級為 `gemini-embedding-2`（MRL 截斷 768 維），新增 429 retry + RPM throttle（#24, #25）|
+| 2026-05-16 | BigQuery `VECTOR_SEARCH` filter pushdown，避免 BadRequest；UI 季度下拉依公司動態過濾 |
+| 2026-05-15 | Tavily 新聞改為依公司名稱過濾並依時間排序；UI 跳脫 `$` 避免 LaTeX 渲染 |
+| 2026-05-14 | Gemini 主後端切換至 `gemini-3.1-flash-lite` (preview)，免費額度更大 |
 | 2026-05-13 | 前瞻型查詢自動路由到 Tavily 即時新聞；自訂查詢欄位支援語音輸入 |
 | 2026-05-13 | GCP Secret Manager 整合 + `rotate_secret.sh` / `setup_gcp_secrets.sh` 助手腳本 |
 | 2026-05-13 | Anthropic backend 回歸（Claude Sonnet 4.6 / Haiku 4.5） |
@@ -49,7 +55,7 @@ EarningsWatch 透過 **7 節點 LangGraph RAG Agent** 自動分析上市公司�
 PDF 法說會逐字稿
   → smart_parser（pdfplumber）
   → chunker（QA-pair / sliding-window）
-  → embedder（Vertex AI text-multilingual-embedding-002, 768維）
+  → embedder（Gemini `gemini-embedding-2`，MRL 截斷至 768 維；429 retry + RPM throttle）
   → BigQuery Vector Search（Serverless，免維護向量庫）
 
 使用者查詢（Streamlit UI）
@@ -125,7 +131,7 @@ python scripts/run_ingestion.py --pdf TSMC\ 2Q24\ Transcript.pdf  # 單一檔案
 |---|---|---|
 | `GOOGLE_CLOUD_PROJECT` | 必填 | GCP 專案 ID（BigQuery + Vertex AI 都在這個專案下）|
 | `OPENAI_API_KEY` | 擇一 | GPT-5 / GPT-5-mini ★ 主力 |
-| `GEMINI_API_KEY` | 擇一 | Gemini 2.5 Flash（免費額度大）|
+| `GEMINI_API_KEY` | 擇一 | Gemini 3.1 Flash Lite (preview)（免費額度大）+ `gemini-embedding-2`（ingestion / query embedding）|
 | `ANTHROPIC_API_KEY` | 擇一 | Claude Sonnet 4.6 / Haiku 4.5（付費；topup 後啟用）|
 | `COHERE_API_KEY` | 擇一 | Command R+（同時用於 Rerank）|
 | `TAVILY_API_KEY` | 選填 | 即時新聞搜尋 |
@@ -133,6 +139,7 @@ python scripts/run_ingestion.py --pdf TSMC\ 2Q24\ Transcript.pdf  # 單一檔案
 | `LLM_BACKEND` | 選填 | 強制指定後端（openai / gemini / anthropic / cohere）|
 | `GCP_SECRET_PROJECT` | 選填 | 啟用 Secret Manager；填了之後所有金鑰會從 GCP Secret Manager 讀取，env var 為 fallback |
 | `LANGSMITH_API_KEY` | 選填 | LangSmith tracing（用 Secret Manager 時會自動橋接到 env）|
+| `COVERAGE_MIN_SCORE` | 選填 | Coverage sweep 餘弦相似度門檻（預設 `0.25`；非 float / 不在 [0,1] 範圍會降回預設並印出警告）|
 
 > 🔄 **自動降級：** 主後端配額用完 / 觸發 429 / 模型下線 / 503 時，會印出友善訊息並自動切到下一個後端（順序：openai → gemini → anthropic → cohere）。
 > 🔐 **密鑰管理：** 部署到 GCP 時推薦設 `GCP_SECRET_PROJECT`，金鑰透過 Secret Manager 統一管控；本機開發仍可用 `.env`。
@@ -220,14 +227,18 @@ EarningsWatch/
 | 分類 | 技術 | 版本 |
 |---|---|---|
 | Agent 框架 | LangGraph | ≥ 0.2 |
-| UI | Streamlit | 1.56.0 |
-| 向量資料庫 | BigQuery Vector Search | Serverless |
-| Embedding | Vertex AI `text-multilingual-embedding-002` | — |
+| UI | Streamlit | ≥ 1.39 |
+| 向量資料庫 | BigQuery `VECTOR_SEARCH`（filter pushdown） | Serverless |
+| Embedding | Gemini `gemini-embedding-2`（MRL 截斷 768 維） | google-genai ≥ 1.0 |
+| LLM 後端 | OpenAI `gpt-5` / `gpt-5-mini`、Gemini `gemini-3.1-flash-lite`、Anthropic `claude-sonnet-4-6` / `claude-haiku-4-5`、Cohere `command-r-plus` | — |
 | Rerank | Cohere `rerank-multilingual-v3.0` | — |
+| 規格管理 | [OpenSpec](https://github.com/Fission-AI/OpenSpec) | — |
 | 密鑰管理 | GCP Secret Manager | — |
-| PDF 解析 | pdfplumber | 0.11.9 |
-| 圖表 | Plotly | 6.7.0 |
-| PDF 匯出 | fpdf2 | 2.8.7 |
+| 新聞檢索 | Tavily Search（公司名稱過濾 + 時間排序） | ≥ 0.5 |
+| 股價資料 | yfinance | ≥ 0.2.40 |
+| PDF 解析 | pdfplumber | ≥ 0.11 |
+| 圖表 | Plotly | ≥ 5.0 |
+| PDF 匯出 | fpdf2 | ≥ 2.7 |
 | 部署 | GCP Cloud Run | — |
 
 ---
