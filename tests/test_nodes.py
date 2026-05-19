@@ -307,3 +307,102 @@ class TestShouldContinue:
         # Low confidence would normally retry, but cost_guard forces end
         state = {"confidence": 0.3, "iteration": 1, "cost_guard_triggered": True}
         assert nodes.should_continue(state) == "end"
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Regression: should_retry_llm honored end-to-end (spec audit fix)
+# ──────────────────────────────────────────────────────────────────────────
+
+class TestSelfReflectRetryHintHonored:
+    """Spec self-reflection-loop says retry triggers when
+       (confidence < 0.75 OR should_retry_llm) AND iteration < 3.
+
+    Previously self_reflect honored should_retry_llm internally (rebuilt
+    sub_queries, bumped iteration) but should_continue only saw the
+    numeric confidence — so when LLM judged score >= 0.75 with
+    should_retry=true, retry prep was done but the graph routed to report.
+
+    Fix: when do_retry is true purely because should_retry_llm, clamp the
+    `confidence` reported in state to 0.74 so should_continue routes back.
+    """
+
+    def _strong_state(self, iteration=0):
+        return {
+            "query": "q", "company": "X", "topic": "AI",
+            "iteration": iteration,
+            "retrieved": {
+                "2024Q1": [
+                    {"score": 0.85, "payload": {"content": "x", "source_page": 1}},
+                    {"score": 0.78, "payload": {"content": "y", "source_page": 2}},
+                ],
+                "2024Q2": [
+                    {"score": 0.82, "payload": {"content": "a", "source_page": 1}},
+                    {"score": 0.71, "payload": {"content": "b", "source_page": 2}},
+                ],
+            },
+            "contradictions": [],
+            "promises": [],
+            "sub_queries": [],
+            "cost_baseline_usd": 0.0,
+        }
+
+    def test_high_score_with_retry_hint_routes_to_retry(self, monkeypatch):
+        """LLM gives high score but explicit should_retry=true → graph must retry."""
+        monkeypatch.setattr(
+            nodes, "_llm",
+            lambda *a, **kw: '{"score": 0.95, "should_retry": true}',
+        )
+
+        out = nodes.self_reflect(self._strong_state())
+
+        # Clamped confidence so should_continue picks retry
+        assert out["confidence"] < 0.75
+        # And should_continue agrees
+        next_step = nodes.should_continue({**out, "cost_guard_triggered": False})
+        assert next_step == "retry"
+
+    def test_high_score_without_retry_hint_routes_to_end(self, monkeypatch):
+        """High score with should_retry=false should NOT clamp; routes to end."""
+        monkeypatch.setattr(
+            nodes, "_llm",
+            lambda *a, **kw: '{"score": 0.95, "should_retry": false}',
+        )
+
+        out = nodes.self_reflect(self._strong_state())
+
+        # Unchanged confidence
+        assert out["confidence"] >= 0.75
+        next_step = nodes.should_continue(out)
+        assert next_step == "end"
+
+    def test_retry_hint_ignored_when_cost_guard_trips(self, monkeypatch):
+        """If cost guard triggers, do not clamp — cost_guard_triggered drives end."""
+        from src.core import telemetry as _tele
+        monkeypatch.setattr(
+            nodes, "_llm",
+            lambda *a, **kw: '{"score": 0.95, "should_retry": true}',
+        )
+        # Spend over default $0.50 budget
+        _tele.record(_tele.LLMCall(
+            backend="openai", model="gpt-5", cost_usd=0.60,
+        ))
+
+        out = nodes.self_reflect(self._strong_state(iteration=1))
+
+        # cost guard wins; confidence is NOT clamped
+        assert out["cost_guard_triggered"] is True
+        assert out["confidence"] >= 0.75
+
+    def test_retry_hint_ignored_at_iteration_cap(self, monkeypatch):
+        """At iteration=3, do_retry is False → no clamp regardless of LLM hint."""
+        monkeypatch.setattr(
+            nodes, "_llm",
+            lambda *a, **kw: '{"score": 0.95, "should_retry": true}',
+        )
+
+        out = nodes.self_reflect(self._strong_state(iteration=3))
+
+        # Iteration cap stops retry path → confidence NOT clamped
+        assert out["confidence"] >= 0.75
+        next_step = nodes.should_continue(out)
+        assert next_step == "end"
