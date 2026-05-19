@@ -225,3 +225,84 @@ class TestEdges:
         chunks = chunker.chunk_document(pages)
         # Flattens both non-empty pages
         assert len(chunks) >= 2
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Regression tests for the spec-audit bug fixes
+# ──────────────────────────────────────────────────────────────────────────
+
+class TestSplitQADelimiterAlignment:
+    """Regression: _split_qa previously paired delimiters[i] with splits[i],
+    dropping the first question and attaching every answer to the WRONG
+    question marker. The fix pairs delimiters[i-1] with splits[i].
+    """
+
+    def test_first_question_prefix_preserved(self):
+        """Text starting with a QA marker must keep the FIRST question's prefix."""
+        # Build a single-QA-pair text using the `^[問答][:：]` pattern.
+        # Each side must exceed MIN_CHUNK_LEN=50 chars after strip.
+        q_body = "能否說明本季毛利率的展望以及對下季的指引方向？" * 4  # ~96 chars
+        a_body = "我們對毛利率維持審慎樂觀，N3 良率提升是主因。" * 4  # ~96 chars
+        text = "問：" + q_body + "\n" + "答：" + a_body
+        chunks = chunker._split_qa(text)
+
+        # Both the 問 chunk and 答 chunk should appear, each with the CORRECT prefix
+        assert any(c.startswith("問：") for c in chunks), \
+            f"問: prefix missing. chunks={chunks!r}"
+        assert any(c.startswith("答：") for c in chunks), \
+            f"答: prefix missing. chunks={chunks!r}"
+
+    def test_answer_not_attached_to_wrong_marker(self):
+        """An answer must not be prefixed with the NEXT question's marker."""
+        # 問→答→問→答 sequence. Each segment long enough to survive MIN_CHUNK_LEN.
+        ans_text = "本季毛利率符合預期，主因為產品組合改善與良率提升。" * 3
+        q_text   = "請說明下季的營收展望與資本支出規劃。" * 3
+        text = (
+            "問：" + q_text + "\n"
+            + "答：" + ans_text + "\n"
+            + "問：" + q_text + "\n"
+            + "答：" + ans_text
+        )
+        chunks = chunker._split_qa(text)
+
+        # Pre-fix: chunks[0] was "答：" + q_text (first question's text with answer marker).
+        # Post-fix: any chunk containing q_text content should start with 問:, not 答:
+        for c in chunks:
+            if "毛利率符合預期" in c:  # 答 content
+                assert c.startswith("答："), \
+                    f"答 content must keep 答 prefix, got: {c[:30]!r}"
+            elif "下季的營收展望" in c:  # 問 content
+                assert c.startswith("問："), \
+                    f"問 content must keep 問 prefix, got: {c[:30]!r}"
+
+
+class TestChunkIndexContiguous:
+    """Regression: chunk_page used enumerate index for chunk_index, which
+    left gaps when raw chunks were filtered below MIN_CHUNK_LEN. Fix uses
+    a survivor counter.
+    """
+
+    def test_chunk_index_no_gaps_when_chunks_filtered(self, monkeypatch):
+        """If the middle raw chunk is dropped, surviving chunks must have
+        chunk_index = 0, 1 (not 0, 2)."""
+        # Mock _sliding_window to return chunks with one short (will be filtered)
+        # sandwiched between two long ones.
+        def fake_sliding(text, *_a, **_k):
+            return [
+                "first long chunk " * 20,  # ~340 chars, kept
+                "tiny",                    # < MIN_CHUNK_LEN=50, dropped
+                "third long chunk " * 20,  # kept
+            ]
+        monkeypatch.setattr(chunker, "_sliding_window", fake_sliding)
+
+        page = {
+            "content": "opening session content " * 30,
+            "has_table": False,
+            "parse_method": "pdfplumber",
+            "metadata": {"company": "X", "quarter": "2024Q1"},
+        }
+        chunks = chunker.chunk_page(page)
+
+        # 2 chunks survive (first + third); indices must be contiguous
+        assert len(chunks) == 2
+        assert [c["chunk_index"] for c in chunks] == [0, 1]

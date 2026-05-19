@@ -53,6 +53,13 @@ def _split_qa(text: str) -> list[str]:
     """
     依 QA 模式切割問答段落。
     每個 chunk = 一個問題 + 對應的回答。
+
+    [b] re.split 不含 capture group 時回傳 [pre, ans1, ans2, ...]：splits[i]
+    （i >= 1）是「delimiters[i-1] 之後、delimiters[i] 之前」的內容；
+    splits[0] 是首個 delimiter 之前的內容（文字以 QA 標記開頭時為空字串）。
+    因此正確配對是 delimiters[i-1] + splits[i]，先前用 delimiters[i] + splits[i]
+    會（a）丟失第一個問題，（b）把每個答案掛上「下一個」問題的標記，造成
+    QA chunk 的問題前綴整體錯位。
     """
     splits = QA_REGEX.split(text)
     delimiters = QA_REGEX.findall(text)
@@ -62,10 +69,11 @@ def _split_qa(text: str) -> list[str]:
         part = part.strip()
         if not part or len(part) < MIN_CHUNK_LEN:
             continue
-        if i < len(delimiters):
-            # 問題 + 回答合併
-            qa_pair = delimiters[i] + part
+        # splits[i] (i >= 1) 緊跟在 delimiters[i-1] 之後 → 配對該 delimiter
+        if i > 0 and (i - 1) < len(delimiters):
+            qa_pair = delimiters[i - 1] + part
         else:
+            # i == 0：首個匹配前的「前置內容」，無對應 delimiter
             qa_pair = part
         # QA chunk 若太長仍需切割
         if len(qa_pair) > CHUNK_SIZE * 2:
@@ -104,8 +112,15 @@ def chunk_page(page_data: dict) -> list[dict]:
         else:
             raw_chunks = _sliding_window(content)
 
+    # [b] chunk_index 用「存活計數器」而非 enumerate 的 raw 位置：
+    # 若中間有 chunk 因 MIN_CHUNK_LEN 過短被丟，倖存的 chunks 必須連續為
+    # 0, 1, 2,…（spec: pdf-chunking）。raw 位置若有 gap，下游 embedder.py
+    # 用 (source_file, source_page, chunk_index) 算 deterministic UUID 時，
+    # 同一份 PDF 在 MIN_CHUNK_LEN 變動後會產出不同 UUID → BigQuery 重新匯入
+    # 時無法去重、整批變重複。
     result = []
-    for i, chunk_text in enumerate(raw_chunks):
+    keep_idx = 0
+    for chunk_text in raw_chunks:
         chunk_text = chunk_text.strip()
         if len(chunk_text) < MIN_CHUNK_LEN:
             continue
@@ -137,13 +152,14 @@ def chunk_page(page_data: dict) -> list[dict]:
 
         result.append({
             "content": chunk_text,
-            "chunk_index": i,
+            "chunk_index": keep_idx,
             "section": section,
             "contains_guidance": contains_guidance,
             "contains_number": contains_number,
             "topics": topics,
             **metadata,   # company, quarter, date, stock_code, source_page, source_file
         })
+        keep_idx += 1
 
     return result
 

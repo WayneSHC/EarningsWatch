@@ -698,8 +698,28 @@ gaps 應指出「retrieve 還沒抓到但對回答有幫助」的主題（如：
             "停止 retry，以現有資料生成報告"
         )
 
+    # [b] should_retry_llm 端到端對齊：self_reflect 在 line 617 已 honor
+    # `score < 0.75 OR should_retry_llm`，但 should_continue 只看 confidence。
+    # 當 LLM judge score >= 0.75 卻 should_retry=true 時，self_reflect 重建了
+    # sub_queries 並 bump iteration，graph 卻不真的 retry（spec self-reflection-loop
+    # 明定 OR 條件應觸發實際 retry）。把對 graph 公布的 confidence 夾到 0.74，
+    # 讓 should_continue 自然走 retry。cost_guard 觸發時不夾（由 cost_guard
+    # 統一決定結束）。
+    reported_confidence = score
+    if (
+        should_retry_llm
+        and do_retry
+        and not cost_guard
+        and score >= 0.75
+    ):
+        reported_confidence = 0.74
+        log.append(
+            f"  ↻ LLM judge 要求重查（score={score:.2f}），夾低 confidence "
+            "至 0.74 以觸發 retry"
+        )
+
     return {
-        "confidence": score,
+        "confidence": reported_confidence,
         "reflection_issues": issues,
         "reflection_gaps": gaps,
         "iteration": iteration + 1,
