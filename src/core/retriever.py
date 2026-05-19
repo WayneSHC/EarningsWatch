@@ -82,7 +82,7 @@ def embed_query(text: str) -> list[float]:
     return embed_query_texts([text])[0]
 
 def clear_retriever_cache() -> None:
-    pass  # BigQuery 不需要清空本地 BM25 索引快取
+    pass  # BigQuery 為 serverless，沒有本地索引需要清空（保留 API 給 ingestion 呼叫）
 
 def _build_where_clause(company: str | None, quarters: list[str] | None, section: str | None) -> tuple[str, dict]:
     conditions = []
@@ -210,7 +210,6 @@ def retrieve(
     section: str | None = None,
     top_k: int = TOP_K_RERANK,
 ) -> list[dict]:
-    # 直接使用 vector search，取代先前的 hybrid (BM25 + Vector + RRF)
     candidates = vector_search(query, company, quarters, section, top_k=TOP_K_RETRIEVAL)
     return rerank(query, candidates, top_n=top_k)
 
