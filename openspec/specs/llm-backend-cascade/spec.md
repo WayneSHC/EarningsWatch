@@ -53,6 +53,36 @@
 - **WHEN** `get_model_name("dev")` 被呼叫
 - **THEN** 回傳 `"claude-haiku-4-5-20251001"`
 
+### Requirement: GPT-5 系列呼叫 MUST 帶 `reasoning_effort` 避免空回應
+
+`_call_openai_compat` MUST 對 model 名稱以 `gpt-5` 開頭的呼叫加上 `reasoning_effort` 參數。預設值為 `"minimal"`，可由環境變數 `LLM_REASONING_EFFORT` 覆寫。非 `gpt-5` 開頭的 OpenAI 模型（如 `gpt-4o`）MUST 不帶此參數（非 reasoning 模型，傳入會被 API 以 400 拒絕）。
+
+原因：GPT-5 系列為 reasoning 模型，`max_completion_tokens` 同時涵蓋「推理 token」與「輸出 token」。在預設 `reasoning_effort`（medium）下，稍微複雜的 prompt 會把整個 token 預算耗在推理上、輸出 0 token，`message.content` 變為空字串或 `None`，使下游（如 `contradiction.batch_detect`）只能走 `_extract_json` 降級路徑、形同失效。`"minimal"` 確保預算留給實際輸出。
+
+`_call_openai_compat` MUST 在 `message.content` 為 `None` 時回傳空字串（`(content or "").strip()`），不 raise `AttributeError`。
+
+#### Scenario: gpt-5 帶 reasoning_effort
+- **WHEN** `_call_openai_compat("...", "gpt-5", 600)` 被呼叫
+- **THEN** 送進 OpenAI SDK 的 kwargs 含 `reasoning_effort == "minimal"`（或 `LLM_REASONING_EFFORT` 指定值）
+
+#### Scenario: gpt-5-mini 也帶 reasoning_effort
+- **WHEN** `_call_openai_compat("...", "gpt-5-mini", 600)` 被呼叫
+- **THEN** kwargs 含 `reasoning_effort`
+
+#### Scenario: 非 gpt-5 模型不帶 reasoning_effort
+- **WHEN** `_call_openai_compat("...", "gpt-4o", 600)` 被呼叫
+- **THEN** kwargs 不含 `reasoning_effort` 鍵
+
+#### Scenario: content 為 None 時回傳空字串
+- **GIVEN** OpenAI 回傳的 `message.content` 為 `None`
+- **WHEN** `_call_openai_compat(...)` 被呼叫
+- **THEN** 回傳的 text 為 `""`，不 raise
+
+#### Scenario: 環境變數覆寫 reasoning effort
+- **GIVEN** `LLM_REASONING_EFFORT=low`
+- **WHEN** 模組重新載入並呼叫 `_call_openai_compat("...", "gpt-5", 600)`
+- **THEN** kwargs 含 `reasoning_effort == "low"`
+
 ### Requirement: `chat()` MUST 在 quota / 認證 / 模型錯誤時跨後端 fallback
 
 `chat()` MUST 將下列 marker 視為「不可重試、立刻換後端」（檢查全部以 case-insensitive 比對 `str(exc)`）：`RESOURCE_EXHAUSTED`、`quota`、`exceeded`、`insufficient_quota`、`billing`、`credit balance`、`credit_balance`、`low balance`、`rate limit`、`rate_limit`、`too many requests`、`429`、`401`、`403`、`404`、`NOT_FOUND`、`not_found`、`is not found`、`does not exist`、`model_not_found`、`InvalidModel`、`503`、`service unavailable`、`overloaded`。觸發時 MUST 印出由 `_format_quota_message()` 產生的中文友善提示，然後嘗試下一個有 key 的後端。

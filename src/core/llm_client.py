@@ -220,6 +220,15 @@ def _get_cohere_llm_client():
 
 # ── 各後端呼叫實作 ────────────────────────────────────────────────────────────
 
+# [b] GPT-5 系列是 reasoning 模型：`max_completion_tokens` 同時涵蓋「推理」與
+#     「輸出」token。若用預設 reasoning_effort（medium），稍微複雜的 prompt
+#     就會把整個 token 預算耗在推理上、輸出 0 token → message.content 變空字串
+#     （finit_reason="length"），下游 _extract_json 只能降級回傳，矛盾偵測形同失效。
+#     本專案的 prompt 多為結構化 JSON 抽取 / 分類，reasoning_effort="minimal"
+#     即足夠且能確保 token 預算留給實際輸出。可由 LLM_REASONING_EFFORT 覆寫。
+_GPT5_REASONING_EFFORT = os.getenv("LLM_REASONING_EFFORT", "minimal").strip() or "minimal"
+
+
 def _call_openai_compat(prompt: str, model: str, max_tokens: int,
                          base_url: str | None = None,
                          api_key_env: str = "OPENAI_API_KEY") -> tuple[str, int, int]:
@@ -230,12 +239,19 @@ def _call_openai_compat(prompt: str, model: str, max_tokens: int,
         舊模型仍接受 `max_tokens`。先試新參數，失敗再退回舊參數，雙向相容。
         TypeError 通常是 SDK 層 unexpected keyword；BadRequestError 也可能是
         伺服器端說「請改用 max_completion_tokens」，兩種都重試。
+
+    [b] gpt-5* 模型額外帶 `reasoning_effort`（見 _GPT5_REASONING_EFFORT 註解），
+        避免推理 token 吃光預算造成空回應。
     """
     client = _get_openai_client(api_key_env, base_url)
     base_kwargs = {
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
     }
+    # [b] 僅對 gpt-5 系列加 reasoning_effort；非 reasoning 模型（gpt-4o 等）
+    #     不接受此參數，加了會 400。
+    if model.startswith("gpt-5"):
+        base_kwargs["reasoning_effort"] = _GPT5_REASONING_EFFORT
     try:
         resp = client.chat.completions.create(
             max_completion_tokens=max_tokens, **base_kwargs
@@ -254,7 +270,9 @@ def _call_openai_compat(prompt: str, model: str, max_tokens: int,
             )
         else:
             raise
-    text = resp.choices[0].message.content.strip()
+    # [b] reasoning 模型在推理耗盡預算時 content 可能為 None；用 `or ""` 防
+    #     AttributeError，讓上層 _extract_json 走降級而非整串 pipeline 崩掉。
+    text = (resp.choices[0].message.content or "").strip()
     usage = getattr(resp, "usage", None)
     p_tok = int(getattr(usage, "prompt_tokens", 0) or 0) if usage else 0
     c_tok = int(getattr(usage, "completion_tokens", 0) or 0) if usage else 0
