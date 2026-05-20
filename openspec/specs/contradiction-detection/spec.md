@@ -29,6 +29,32 @@
 - **WHEN** `batch_detect(...)` 被呼叫
 - **THEN** 實際傳給 `detect_contradiction` 的 `stmt["content"]` 長度 `≤ 2000`
 
+### Requirement: `batch_detect` SHALL 降權表格型 chunk
+
+`batch_detect` MUST 在對每季取前 `chunks_per_pair` 筆送 LLM 之前，先以 `_deprioritize_tables()` 把 `payload.section == "table"` 的 chunk 排到列尾（stable sort，保留原本 score 排序）。某季只有表格 chunk 時 MUST 仍保留它們（不清空）。
+
+理由：矛盾偵測比對的是「管理層跨季發言的立場」，需要口語敘述。財務數字表格（資產負債表、財務指標表）不含立場語意，若排在敘述 chunk 之前會在 `[:chunks_per_pair]` 切片時擠掉真正有用的發言，使 LLM 只能正確回「無關」。
+
+#### Scenario: 表格 chunk 排到敘述 chunk 之後
+- **GIVEN** 一季 chunks 依序為 `[table, QA, table, opening]`
+- **WHEN** `_deprioritize_tables(chunks)` 被呼叫
+- **THEN** 回傳順序為 `[QA, opening, table, table]`（敘述在前、表格在後，組內順序不變）
+
+#### Scenario: 缺 section 視為敘述
+- **GIVEN** 某 chunk 無 `payload.section` 欄位
+- **WHEN** `_deprioritize_tables(...)` 被呼叫
+- **THEN** 該 chunk 排在 `section == "table"` 的 chunk 之前
+
+#### Scenario: 整季皆為表格時仍保留
+- **GIVEN** 一季所有 chunk 的 `section` 皆為 `"table"`
+- **WHEN** `_deprioritize_tables(...)` 被呼叫
+- **THEN** 全部 chunk 仍在回傳結果中（不被清空）
+
+#### Scenario: batch_detect 餵 LLM 敘述而非表格
+- **GIVEN** 某季有 4 個 table chunk + 1 個敘述 chunk、`chunks_per_pair == 4`
+- **WHEN** `batch_detect(...)` 組裝送 LLM 的內容
+- **THEN** 該敘述 chunk 的內容出現在送進 LLM 的 prompt 中
+
 ### Requirement: 兩季任一內容為空 MUST 跳過比對
 
 `batch_detect` MUST 在任一季 chunks 為空 OR 串接 content 經 `strip()` 後為空時，跳過該季度對的 LLM 呼叫；MUST 不 raise，並印出包含季度名的警告訊息。

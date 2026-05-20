@@ -461,3 +461,83 @@ class TestVerifyQuote:
         # confidence docked by 0.2 (0.8 → 0.6) and flagged
         assert analysis["verification_failed"] is True
         assert analysis["confidence"] == pytest.approx(0.6, abs=0.01)
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# _deprioritize_tables — table-section chunks sorted last (B: spec-audit fix)
+# ──────────────────────────────────────────────────────────────────────────
+
+class TestDeprioritizeTables:
+    def _chunk(self, cid, section):
+        return {"id": cid, "payload": {"content": f"c{cid}", "section": section}}
+
+    def test_table_chunks_sorted_last(self):
+        chunks = [
+            self._chunk(1, "table"),
+            self._chunk(2, "QA"),
+            self._chunk(3, "table"),
+            self._chunk(4, "opening"),
+        ]
+        out = cd._deprioritize_tables(chunks)
+        sections = [c["payload"]["section"] for c in out]
+        # Narrative sections first, table sections last
+        assert sections == ["QA", "opening", "table", "table"]
+
+    def test_stable_within_groups(self):
+        """Original order preserved within narrative / table groups."""
+        chunks = [
+            self._chunk(1, "QA"),
+            self._chunk(2, "table"),
+            self._chunk(3, "guidance"),
+            self._chunk(4, "table"),
+        ]
+        out = cd._deprioritize_tables(chunks)
+        ids = [c["id"] for c in out]
+        # QA(1), guidance(3) keep relative order; tables(2,4) keep relative order
+        assert ids == [1, 3, 2, 4]
+
+    def test_all_tables_still_returned(self):
+        """A quarter with only table chunks still yields them — better than empty."""
+        chunks = [self._chunk(1, "table"), self._chunk(2, "table")]
+        out = cd._deprioritize_tables(chunks)
+        assert len(out) == 2
+
+    def test_missing_section_treated_as_narrative(self):
+        """Chunks without a section field rank as narrative (before tables)."""
+        chunks = [
+            {"id": 1, "payload": {"content": "x"}},          # no section
+            self._chunk(2, "table"),
+        ]
+        out = cd._deprioritize_tables(chunks)
+        assert out[0]["id"] == 1 and out[1]["id"] == 2
+
+    def test_batch_detect_feeds_narrative_over_tables(self, monkeypatch):
+        """batch_detect must send narrative chunks (not balance-sheet tables)
+        to the LLM when a quarter has both — chunks_per_pair caps the slice."""
+        captured = {}
+
+        def fake_chat(prompt, *a, **kw):
+            captured["prompt"] = prompt
+            return ('{"same_topic": true, "stance_change": "更樂觀", '
+                    '"has_contradiction": false, "confidence": 0.8}')
+
+        monkeypatch.setattr(cd, "llm_chat", fake_chat)
+        monkeypatch.setenv("LLM_PAIR_WORKERS", "1")
+
+        def chunk(content, section):
+            return {"payload": {"content": content, "section": section,
+                                "source_file": "f.pdf", "source_page": 1}}
+
+        # Each quarter: 4 table chunks + 1 narrative chunk. chunks_per_pair=4
+        # → without deprioritization the narrative chunk would be dropped.
+        data = {
+            "2024Q1": [chunk(f"balance sheet table {i}", "table") for i in range(4)]
+                      + [chunk("管理層談 AI 需求強勁的敘述發言", "QA")],
+            "2024Q2": [chunk(f"balance sheet table {i}", "table") for i in range(4)]
+                      + [chunk("管理層談庫存調整的敘述發言", "QA")],
+        }
+        cd.batch_detect(data, "AI需求")
+
+        # The narrative chunks must appear in the prompt sent to the LLM
+        assert "管理層談 AI 需求強勁的敘述發言" in captured["prompt"]
+        assert "管理層談庫存調整的敘述發言" in captured["prompt"]

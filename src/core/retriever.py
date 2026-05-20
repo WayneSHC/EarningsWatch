@@ -4,7 +4,10 @@ src/core/retriever.py
 """
 
 import os
+import time
+from collections import deque
 from functools import lru_cache
+from threading import Lock
 from typing import Any
 import cohere
 from google.cloud import bigquery
@@ -77,6 +80,59 @@ def _get_cohere_client() -> cohere.Client | None:
     if not key:
         return None
     return cohere.Client(key)
+
+
+# ── [b] Cohere rerank 速率節流 ────────────────────────────────────────────────
+# Cohere Trial key 限 10 calls/min。互動式單次查詢只發少數 rerank 呼叫，遠低於
+# 上限、零延遲；但爆量負載（benchmark、多公司並行）會超限觸發 429，使 rerank
+# 整批失效、檢索品質下降。本節流器用 sliding-window 計數：每 60 秒視窗內前
+# COHERE_MAX_RPM 次呼叫無延遲通過，超出的呼叫 block 到有空位才放行 —— 讓免費
+# key 在所有情境都正確運作（互動零感、爆量自動排隊）。COHERE_MAX_RPM=0 關閉
+# 節流（production key 上限較高時用）。
+def _load_cohere_max_rpm() -> int:
+    raw = os.getenv("COHERE_MAX_RPM", "10")
+    try:
+        val = int(raw)
+        return val if val >= 0 else 10
+    except (TypeError, ValueError):
+        print(f"[Retriever] ⚠ COHERE_MAX_RPM={raw!r} 非整數，使用預設 10")
+        return 10
+
+
+class _CohereThrottle:
+    """[c] thread-safe sliding-window rate limiter for Cohere rerank calls."""
+
+    _WINDOW_SEC = 60.0
+
+    def __init__(self, max_rpm: int) -> None:
+        self._max_rpm = max_rpm
+        self._lock = Lock()
+        self._calls: deque[float] = deque()
+
+    def _purge(self, now: float) -> None:
+        """移除滑動視窗外的呼叫記錄（呼叫時須持有 _lock）。"""
+        while self._calls and now - self._calls[0] >= self._WINDOW_SEC:
+            self._calls.popleft()
+
+    def acquire(self) -> None:
+        """取得一個呼叫額度；視窗已滿時 block 到有空位。max_rpm<=0 時直接放行。"""
+        if self._max_rpm <= 0:
+            return
+        with self._lock:
+            now = time.time()
+            self._purge(now)
+            if len(self._calls) >= self._max_rpm:
+                # 視窗已滿 → 等到最舊一筆滿 60s 才有空位
+                wait = self._WINDOW_SEC - (now - self._calls[0])
+                if wait > 0:
+                    print(f"[Retriever] Cohere 節流：{wait:.1f}s 後再發 rerank")
+                    time.sleep(wait)
+                now = time.time()
+                self._purge(now)
+            self._calls.append(time.time())
+
+
+_cohere_throttle = _CohereThrottle(_load_cohere_max_rpm())
 
 def embed_query(text: str) -> list[float]:
     return embed_query_texts([text])[0]
@@ -190,6 +246,9 @@ def rerank(query: str, candidates: list[dict], top_n: int = TOP_K_RERANK) -> lis
         return candidates[:top_n]
 
     documents = [c["payload"].get("content", "") for c in candidates]
+    # [b] 先過節流器：讓免費 Cohere key 的爆量呼叫排隊而非觸發 429（互動式
+    #     少量呼叫不會 block）。節流後 rerank 才能真正運作而非被迫降級。
+    _cohere_throttle.acquire()
     # [b] Cohere rerank 是「精修」步驟，非必要步驟：vector_search 已回傳按
     #     cosine 相似度排序的候選。若 Cohere 呼叫失敗（429 Trial-key 速率限制、
     #     金鑰失效、服務中斷…），絕不該讓整個 retrieve() 連帶崩潰 —— 那會使

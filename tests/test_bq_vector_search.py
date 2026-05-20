@@ -344,3 +344,79 @@ class TestRetrieveCoverage:
         assert out == {}
         captured = capsys.readouterr()
         assert "分數不足 0.4" in captured.out
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# _CohereThrottle — sliding-window rate limiter (A: free-key resilience)
+# ──────────────────────────────────────────────────────────────────────────
+
+class TestCohereThrottle:
+    def test_under_limit_no_sleep(self, monkeypatch):
+        """First max_rpm calls in the window pass with zero delay."""
+        slept = []
+        monkeypatch.setattr(retriever.time, "sleep", lambda s: slept.append(s))
+
+        thr = retriever._CohereThrottle(max_rpm=10)
+        for _ in range(10):
+            thr.acquire()
+
+        assert slept == []  # 10 calls, limit 10 → no throttling
+
+    def test_over_limit_sleeps(self, monkeypatch):
+        """The (max_rpm + 1)-th call within the window must block."""
+        slept = []
+        monkeypatch.setattr(retriever.time, "sleep", lambda s: slept.append(s))
+
+        thr = retriever._CohereThrottle(max_rpm=3)
+        for _ in range(3):
+            thr.acquire()
+        thr.acquire()  # 4th — window full → must wait
+
+        assert len(slept) == 1
+        assert 0 < slept[0] <= 60.0
+
+    def test_disabled_when_rpm_zero(self, monkeypatch):
+        """COHERE_MAX_RPM=0 → throttle is a no-op (production key path)."""
+        slept = []
+        monkeypatch.setattr(retriever.time, "sleep", lambda s: slept.append(s))
+
+        thr = retriever._CohereThrottle(max_rpm=0)
+        for _ in range(100):
+            thr.acquire()
+
+        assert slept == []
+
+    def test_load_cohere_max_rpm_default(self, monkeypatch):
+        monkeypatch.delenv("COHERE_MAX_RPM", raising=False)
+        assert retriever._load_cohere_max_rpm() == 10
+
+    def test_load_cohere_max_rpm_invalid_falls_back(self, monkeypatch, capsys):
+        monkeypatch.setenv("COHERE_MAX_RPM", "banana")
+        assert retriever._load_cohere_max_rpm() == 10
+        assert "COHERE_MAX_RPM" in capsys.readouterr().out
+
+    def test_load_cohere_max_rpm_negative_falls_back(self, monkeypatch):
+        monkeypatch.setenv("COHERE_MAX_RPM", "-5")
+        assert retriever._load_cohere_max_rpm() == 10
+
+    def test_rerank_calls_throttle(self, monkeypatch):
+        """rerank() must acquire a throttle slot before calling Cohere."""
+        order = []
+
+        class _FakeResult:
+            def __init__(self, i, s):
+                self.index, self.relevance_score = i, s
+
+        class _FakeCohere:
+            def rerank(self, **kwargs):
+                order.append("rerank")
+                return type("R", (), {"results": [_FakeResult(0, 0.9)]})()
+
+        monkeypatch.setattr(retriever, "_get_cohere_client", lambda: _FakeCohere())
+        monkeypatch.setattr(retriever._cohere_throttle, "acquire",
+                            lambda: order.append("throttle"))
+
+        retriever.rerank("q", [{"id": "0", "payload": {"content": "c"}}], top_n=1)
+
+        # throttle.acquire() runs before the Cohere call
+        assert order == ["throttle", "rerank"]
