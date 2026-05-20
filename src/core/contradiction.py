@@ -252,6 +252,21 @@ def detect_contradiction(
     return _extract_json(raw)
 
 
+def _deprioritize_tables(chunks: list[dict]) -> list[dict]:
+    """[b] 把 section="table" 的 chunk 排到最後（stable sort，保留原 score 排序）。
+
+    矛盾偵測比對的是「管理層跨季發言的立場」，需要的是口語敘述。財報數字表格
+    （資產負債表、財務指標表）不含「立場」，餵進 LLM 只會稀釋訊號 —— 實測中
+    曾發生某季檢索回的全是資產負債表，LLM 只能正確回「無關」。batch_detect
+    只取每季前 chunks_per_pair 筆，本函數把敘述型 chunk 排前、表格排後，
+    讓表格在切片時自然落選；某季「只有」表格時仍保留（總比空白好）。
+    """
+    return sorted(
+        chunks,
+        key=lambda c: (c.get("payload", {}) or {}).get("section") == "table",
+    )
+
+
 def _extract_sources(chunks: list[dict]) -> list[dict]:
     """[R6] 從 chunks 萃取 (file, page) 來源清單，去重，給報告做引文。"""
     seen: set[tuple] = set()
@@ -318,8 +333,9 @@ def batch_detect(
             continue
 
         # [R5] 提升至 chunks_per_pair（預設 4），增加跨季比對的資訊密度
-        used_a = chunks_a[:chunks_per_pair]
-        used_b = chunks_b[:chunks_per_pair]
+        # [b] 先把表格型 chunk 降權再切片，確保餵 LLM 的是敘述發言而非數字表
+        used_a = _deprioritize_tables(chunks_a)[:chunks_per_pair]
+        used_b = _deprioritize_tables(chunks_b)[:chunks_per_pair]
         content_a = "\n".join(c.get("payload", {}).get("content", "") for c in used_a)
         content_b = "\n".join(c.get("payload", {}).get("content", "") for c in used_b)
 

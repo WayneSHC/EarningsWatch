@@ -110,6 +110,36 @@
 - **WHEN** `parallel_retrieval` 處理該子查詢
 - **THEN** 該子查詢仍取得 vector-search 結果（不被當作整體失敗丟棄）
 
+### Requirement: `rerank` 呼叫前 MUST 經 Cohere 速率節流器
+
+`rerank` MUST 在呼叫 `client.rerank(...)` 之前先 `_cohere_throttle.acquire()`。`_CohereThrottle` 為 thread-safe 的 sliding-window 速率限制器：60 秒視窗內前 `COHERE_MAX_RPM`（預設 `10`）次呼叫無延遲通過，超出的呼叫 block 至視窗有空位。`COHERE_MAX_RPM` 由環境變數設定，非整數 / 負數時 fallback 至 `10` 並印警告；設為 `0` MUST 完全停用節流（production key 上限較高時用）。
+
+理由：Cohere Trial key 限 10 calls/min。互動式單次查詢只發少數 rerank 呼叫、不會觸及上限；但爆量負載（benchmark、多公司並行）會超限觸發 429 → rerank 全面降級、檢索品質下降。節流器讓免費 key 在所有情境都正確運作 —— 互動零延遲、爆量自動排隊。
+
+#### Scenario: 視窗內未達上限不延遲
+- **GIVEN** `_CohereThrottle(max_rpm=10)`
+- **WHEN** 連續 `acquire()` 10 次
+- **THEN** `time.sleep` 不被呼叫
+
+#### Scenario: 超出上限的呼叫 block
+- **GIVEN** `_CohereThrottle(max_rpm=3)`、已 `acquire()` 3 次
+- **WHEN** 第 4 次 `acquire()`
+- **THEN** `time.sleep` 被呼叫一次，等待時間在 `(0, 60]` 秒
+
+#### Scenario: COHERE_MAX_RPM=0 停用節流
+- **GIVEN** `_CohereThrottle(max_rpm=0)`
+- **WHEN** 連續 `acquire()` 多次
+- **THEN** `time.sleep` 不被呼叫
+
+#### Scenario: 非法 COHERE_MAX_RPM fallback
+- **GIVEN** `COHERE_MAX_RPM=banana`（或負數）
+- **WHEN** `_load_cohere_max_rpm()` 被呼叫
+- **THEN** 回傳 `10`
+
+#### Scenario: rerank 先取節流額度再呼叫 Cohere
+- **WHEN** `rerank(...)` 被呼叫且 Cohere client 可用、candidates 非空
+- **THEN** `_cohere_throttle.acquire()` 在 `client.rerank(...)` 之前被呼叫
+
 ### Requirement: `retrieve_coverage` SHALL 用 PARTITION BY 一次取多季度 top-k
 
 `retrieve_coverage(query, company, missing_quarters, top_k_per_quarter, min_score, max_quarters, use_rerank)` MUST：
