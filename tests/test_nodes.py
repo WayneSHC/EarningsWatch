@@ -406,3 +406,293 @@ class TestSelfReflectRetryHintHonored:
         assert out["confidence"] >= 0.75
         next_step = nodes.should_continue(out)
         assert next_step == "end"
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# query_decomposer — spec: query-decomposition
+# ══════════════════════════════════════════════════════════════════════════
+
+class TestQueryDecomposer:
+    def _state(self, query="台積電 AI 需求各季變化", company="台積電",
+               topic="AI需求", quarters=None):
+        return {
+            "query": query, "company": company, "topic": topic,
+            "quarters": quarters or [],
+        }
+
+    def test_llm_subqueries_used(self, monkeypatch):
+        monkeypatch.setattr(
+            nodes, "_llm",
+            lambda *a, **kw: (
+                '{"sub_queries": ['
+                '{"id": "a", "query": "台積電 AI 跨季", "purpose": "比對", "tool": "bigquery"},'
+                '{"id": "b", "query": "台積電 AI 新聞", "purpose": "背景", "tool": "tavily"}'
+                ']}'
+            ),
+        )
+        out = nodes.query_decomposer(self._state())
+        sqs = out["sub_queries"]
+        assert len(sqs) == 2
+        assert all("query" in s and "tool" in s for s in sqs)
+
+    def test_non_dict_candidate_skipped(self, monkeypatch):
+        monkeypatch.setattr(
+            nodes, "_llm",
+            lambda *a, **kw: (
+                '{"sub_queries": ['
+                '"a bare string",'
+                '{"id": "ok", "query": "台積電 AI 跨季比對", "purpose": "p", "tool": "bigquery"}'
+                ']}'
+            ),
+        )
+        out = nodes.query_decomposer(self._state())
+        # Only the dict candidate survives
+        assert len(out["sub_queries"]) == 1
+        assert out["sub_queries"][0]["id"] == "ok"
+
+    def test_bad_tool_skipped(self, monkeypatch):
+        monkeypatch.setattr(
+            nodes, "_llm",
+            lambda *a, **kw: (
+                '{"sub_queries": ['
+                '{"id": "x", "query": "q1 enough length", "purpose": "p", "tool": "yfinance"},'
+                '{"id": "y", "query": "q2 enough length", "purpose": "p", "tool": "bigquery"}'
+                ']}'
+            ),
+        )
+        out = nodes.query_decomposer(self._state())
+        tools = [s["tool"] for s in out["sub_queries"]]
+        assert "yfinance" not in tools
+        assert "bigquery" in tools
+
+    def test_long_query_truncated_to_120(self, monkeypatch):
+        long_q = "台" * 300
+        monkeypatch.setattr(
+            nodes, "_llm",
+            lambda *a, **kw: (
+                '{"sub_queries": [{"id": "x", "query": "' + long_q
+                + '", "purpose": "p", "tool": "bigquery"}]}'
+            ),
+        )
+        out = nodes.query_decomposer(self._state())
+        assert len(out["sub_queries"][0]["query"]) <= 120
+
+    def test_llm_failure_falls_back_to_template(self, monkeypatch):
+        def boom(*a, **kw):
+            raise RuntimeError("LLM down")
+        monkeypatch.setattr(nodes, "_llm", boom)
+
+        out = nodes.query_decomposer(self._state())
+        # 3-entry fallback template
+        assert len(out["sub_queries"]) == 3
+        assert any("降級" in line for line in out["steps_log"])
+
+    def test_fallback_template_covers_three_angles(self):
+        fb = nodes._fallback_sub_queries("台積電", "AI需求")
+        assert len(fb) == 3
+        tools = [s["tool"] for s in fb]
+        assert tools.count("tavily") == 1
+        assert tools.count("bigquery") == 2
+        assert any(s.get("section_filter") == "guidance" for s in fb)
+
+    def test_quarter_scope_injected_into_prompt(self, monkeypatch):
+        captured = {}
+        def fake_llm(prompt, *a, **kw):
+            captured["prompt"] = prompt
+            return '{"sub_queries": []}'  # forces fallback, fine
+        monkeypatch.setattr(nodes, "_llm", fake_llm)
+
+        nodes.query_decomposer(self._state(quarters=["2024Q1", "2024Q3"]))
+        assert "2024Q1" in captured["prompt"]
+        assert "2024Q3" in captured["prompt"]
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# parallel_retrieval — spec: parallel-retrieval
+# ══════════════════════════════════════════════════════════════════════════
+
+def _chunk(cid, quarter, content="x"):
+    return {"id": cid, "score": 0.8,
+            "payload": {"quarter": quarter, "content": content}}
+
+
+class TestParallelRetrieval:
+    def _state(self, sub_queries, quarters=None, iteration=0,
+               tool_plan=None, retrieved=None):
+        return {
+            "query": "q", "company": "台積電",
+            "quarters": quarters or [],
+            "tool_plan": tool_plan or ["bigquery"],
+            "sub_queries": sub_queries,
+            "iteration": iteration,
+            "retrieved": retrieved or {},
+            "news_context": [],
+            "stock_data": {},
+        }
+
+    def test_adaptive_top_k_guidance_is_4(self, monkeypatch):
+        captured = []
+        def fake_retrieve(*, query, company, quarters, section, top_k):
+            captured.append(top_k)
+            return []
+        monkeypatch.setattr(nodes, "retrieve", fake_retrieve)
+
+        sq = {"id": "g", "query": "q", "tool": "bigquery",
+              "section_filter": "guidance"}
+        nodes.parallel_retrieval(self._state([sq], quarters=["2024Q1"]))
+        assert captured == [4]
+
+    def test_adaptive_top_k_coverage_fill_is_8(self, monkeypatch):
+        captured = []
+        def fake_retrieve(*, query, company, quarters, section, top_k):
+            captured.append(top_k)
+            return []
+        monkeypatch.setattr(nodes, "retrieve", fake_retrieve)
+
+        sq = {"id": "w", "query": "q", "tool": "bigquery",
+              "section_filter": "guidance", "tool_hint": "coverage_fill"}
+        nodes.parallel_retrieval(self._state([sq], quarters=["2024Q1"]))
+        assert captured == [8]
+
+    def test_target_quarter_overrides_quarters_filter(self, monkeypatch):
+        captured = {}
+        def fake_retrieve(*, query, company, quarters, section, top_k):
+            captured["quarters"] = quarters
+            return []
+        monkeypatch.setattr(nodes, "retrieve", fake_retrieve)
+
+        sq = {"id": "w", "query": "q", "tool": "bigquery",
+              "tool_hint": "coverage_fill", "target_quarter": "2024Q2"}
+        nodes.parallel_retrieval(
+            self._state([sq], quarters=["2024Q1", "2024Q2", "2024Q3"])
+        )
+        assert captured["quarters"] == ["2024Q2"]
+
+    def test_tool_failure_isolated(self, monkeypatch):
+        def fake_retrieve(*, query, company, quarters, section, top_k):
+            return [_chunk("c1", "2024Q1")]
+        def boom_news(*a, **kw):
+            raise RuntimeError("tavily down")
+        monkeypatch.setattr(nodes, "retrieve", fake_retrieve)
+        monkeypatch.setattr(nodes, "search_news", boom_news)
+
+        sq = {"id": "a", "query": "q", "tool": "bigquery"}
+        out = nodes.parallel_retrieval(
+            self._state([sq], quarters=["2024Q1"],
+                        tool_plan=["bigquery", "tavily"])
+        )
+        # BigQuery result survives despite Tavily failure
+        assert "2024Q1" in out["retrieved"]
+        assert any("查詢失敗" in line for line in out["steps_log"])
+
+    def test_retry_preserves_prior_retrieved(self, monkeypatch):
+        def fake_retrieve(*, query, company, quarters, section, top_k):
+            return [_chunk("new", "2024Q2")]
+        monkeypatch.setattr(nodes, "retrieve", fake_retrieve)
+
+        prior = {"2024Q1": [_chunk("old", "2024Q1")]}
+        sq = {"id": "a", "query": "q", "tool": "bigquery"}
+        out = nodes.parallel_retrieval(
+            self._state([sq], quarters=["2024Q1", "2024Q2"],
+                        iteration=1, retrieved=prior)
+        )
+        # Prior Q1 chunk retained, new Q2 chunk added
+        assert "2024Q1" in out["retrieved"]
+        assert out["retrieved"]["2024Q1"][0]["id"] == "old"
+        assert "2024Q2" in out["retrieved"]
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# report_generator — spec: report-generation
+# ══════════════════════════════════════════════════════════════════════════
+
+class TestReportGenerator:
+    def _state(self, **overrides):
+        base = {
+            "company": "台積電", "topic": "AI需求", "query": "AI 需求如何",
+            "contradictions": [], "promises": [], "retrieved": {},
+            "news_context": [], "stock_data": {}, "confidence": 0.8,
+            "abstain": False, "cost_guard_triggered": False,
+            "reflection_issues": [], "reflection_gaps": [],
+        }
+        base.update(overrides)
+        return base
+
+    def test_abstain_outputs_insufficient_data_report(self):
+        out = nodes.report_generator(self._state(
+            abstain=True, confidence=0.3,
+            reflection_issues=["只找到 1 季資料"],
+        ))
+        assert "資料不足" in out["final_report"]
+        assert "只找到 1 季資料" in out["final_report"]
+        assert "跨季發言比對" not in out["final_report"]
+
+    def test_cost_guard_notice_present(self, monkeypatch):
+        monkeypatch.setattr(nodes, "llm_chat", lambda *a, **kw: "回答內容")
+        out = nodes.report_generator(self._state(
+            cost_guard_triggered=True,
+            retrieved={"2024Q1": [{"payload": {"content": "AI 需求強勁"}}]},
+        ))
+        assert "預算保護觸發" in out["final_report"]
+
+    def test_zero_chunks_triggers_off_topic(self, monkeypatch):
+        monkeypatch.setattr(nodes, "search_news", lambda *a, **kw: [])
+        # retrieved empty → total_chunks == 0 → off-topic
+        out = nodes.report_generator(self._state(retrieved={}))
+        assert "未在法說會逐字稿中找到相關內容" in out["final_report"]
+        assert "## 一、跨季發言比對" not in out["final_report"]
+
+    def test_off_topic_phrase_triggers_news_mode(self, monkeypatch):
+        monkeypatch.setattr(nodes, "llm_chat",
+                            lambda *a, **kw: "資料中並未提及此主題")
+        monkeypatch.setattr(nodes, "search_news", lambda *a, **kw: [])
+        out = nodes.report_generator(self._state(
+            retrieved={"2024Q1": [{"payload": {"content": "some content"}}]},
+        ))
+        assert "未在法說會逐字稿中找到相關內容" in out["final_report"]
+
+    def test_llm_xss_escaped_in_report(self, monkeypatch):
+        monkeypatch.setattr(nodes, "llm_chat", lambda *a, **kw: "正常回答內容")
+        contradiction = {
+            "quarter_a": "2024Q1", "quarter_b": "2024Q2",
+            "analysis": {
+                "stance_change": "更樂觀",
+                "change_detail": "<script>alert(1)</script>",
+                "has_contradiction": False,
+            },
+            "sources_a": [], "sources_b": [],
+        }
+        out = nodes.report_generator(self._state(
+            contradictions=[contradiction],
+            retrieved={"2024Q1": [{"payload": {"content": "AI 需求"}}],
+                       "2024Q2": [{"payload": {"content": "AI 持續"}}]},
+        ))
+        assert "&lt;script&gt;" in out["final_report"]
+        assert "<script>" not in out["final_report"]
+
+    def test_returns_final_report_and_steps_log(self, monkeypatch):
+        monkeypatch.setattr(nodes, "search_news", lambda *a, **kw: [])
+        out = nodes.report_generator(self._state(retrieved={}))
+        assert isinstance(out["final_report"], str)
+        assert isinstance(out["steps_log"], list)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# _clean_news_snippet — spec: report-generation
+# ══════════════════════════════════════════════════════════════════════════
+
+class TestCleanNewsSnippet:
+    def test_spa_boilerplate_emptied(self):
+        assert nodes._clean_news_snippet("請啟用 JavaScript 以繼續瀏覽") == ""
+
+    def test_markdown_chars_removed(self):
+        out = nodes._clean_news_snippet("## 標題 **粗體** [連結](url)")
+        for ch in "#*[]":
+            assert ch not in out
+
+    def test_truncated_to_max_len(self):
+        out = nodes._clean_news_snippet("乾淨內容" * 100, max_len=180)
+        assert len(out) <= 180
+
+    def test_empty_input(self):
+        assert nodes._clean_news_snippet("") == ""
