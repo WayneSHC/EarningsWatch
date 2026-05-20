@@ -12,11 +12,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           # Gitleaks needs full history to scan all commits on PRs.
           fetch-depth: 0
       - name: Run Gitleaks
+        # Pinned to @v2 — the latest major. Even v2.3.9 still declares
+        # `using: node20`; there is no v3, so the Node-20 deprecation
+        # warning on this step is an upstream limitation, not actionable
+        # here. node20 JS runs fine on the node24 runtime after the cutover.
         uses: gitleaks/gitleaks-action@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -35,12 +39,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 3
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
-          node-version: "20"
+          node-version: "24"
 
       - name: Install OpenSpec CLI
         run: npm install -g @fission-ai/openspec@1.3.1
@@ -49,7 +53,7 @@ jobs:
         run: openspec validate --specs
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.11"
 
@@ -64,10 +68,10 @@ jobs:
     needs: secret-scan
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.11"
           cache: pip
