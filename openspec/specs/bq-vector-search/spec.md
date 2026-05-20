@@ -93,6 +93,23 @@
 - **WHEN** `rerank(...)` 完成
 - **THEN** 回傳列表每個 item 含 `rerank_score`（float）且其餘欄位來自原 candidate
 
+### Requirement: `rerank` Cohere 呼叫失敗 MUST 降級而非崩潰
+
+`rerank` MUST 對 `client.rerank(...)` 包 try/except。任何例外（429 Trial-key 速率限制、金鑰失效、服務中斷、SDK 錯誤等）MUST 被捕獲，函數 MUST 改回傳 `candidates[:top_n]`（vector-search 原始相似度排序），並 print 一則含例外類別名稱的降級警告。
+
+理由：rerank 只是「精修」步驟，`vector_search` 已回傳按 cosine 相似度排序的候選。若 rerank 例外向上傳播，`retrieve()` 整個失敗，`parallel_retrieval` 的該子查詢結果整批丟失，連帶造成季度覆蓋不足、`contradiction_detect` 因 `len(retrieved) < 2` 被跳過。rerank 失敗 MUST NOT 造成整條檢索鏈崩潰。
+
+#### Scenario: Cohere 429 時降級為 vector-search 排序
+- **GIVEN** `client.rerank(...)` raise（例如 `429 Trial key` 速率限制）、`candidates` 有 10 筆
+- **WHEN** `rerank("...", candidates, top_n=5)` 被呼叫
+- **THEN** 回傳 `candidates[:5]`（未重排），不 raise
+- **AND** stdout 含 `rerank 失敗` 與 `降級` 字樣
+
+#### Scenario: 降級不影響後續檢索
+- **GIVEN** 某 bigquery 子查詢的 `retrieve()` 內部 rerank 失敗
+- **WHEN** `parallel_retrieval` 處理該子查詢
+- **THEN** 該子查詢仍取得 vector-search 結果（不被當作整體失敗丟棄）
+
 ### Requirement: `retrieve_coverage` SHALL 用 PARTITION BY 一次取多季度 top-k
 
 `retrieve_coverage(query, company, missing_quarters, top_k_per_quarter, min_score, max_quarters, use_rerank)` MUST：

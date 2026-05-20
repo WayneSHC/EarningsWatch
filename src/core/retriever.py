@@ -190,12 +190,26 @@ def rerank(query: str, candidates: list[dict], top_n: int = TOP_K_RERANK) -> lis
         return candidates[:top_n]
 
     documents = [c["payload"].get("content", "") for c in candidates]
-    resp = client.rerank(
-        model="rerank-v3.5",
-        query=query,
-        documents=documents,
-        top_n=top_n,
-    )
+    # [b] Cohere rerank 是「精修」步驟，非必要步驟：vector_search 已回傳按
+    #     cosine 相似度排序的候選。若 Cohere 呼叫失敗（429 Trial-key 速率限制、
+    #     金鑰失效、服務中斷…），絕不該讓整個 retrieve() 連帶崩潰 —— 那會使
+    #     parallel_retrieval 的該子查詢結果整批丟失、季度覆蓋不足、矛盾偵測
+    #     被跳過。降級為直接回傳 vector-search 原始排序的前 top_n 筆。
+    try:
+        resp = client.rerank(
+            model="rerank-v3.5",
+            query=query,
+            documents=documents,
+            top_n=top_n,
+        )
+    except Exception as e:
+        # [f] 只印 type 名稱與截斷訊息，避免 Cohere 回應 body（含 trace-id）刷版
+        print(
+            f"[Retriever] Cohere rerank 失敗（{type(e).__name__}），"
+            f"降級為 vector-search 排序：{str(e)[:120]}"
+        )
+        return candidates[:top_n]
+
     reranked = []
     for r in resp.results:
         item = candidates[r.index].copy()
