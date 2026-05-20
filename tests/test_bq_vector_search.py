@@ -243,6 +243,57 @@ class TestRerank:
         out = retriever.rerank("q", [], top_n=5)
         assert out == []
 
+    def test_cohere_error_degrades_to_vector_order(self, monkeypatch, capsys):
+        """Regression: a Cohere API failure (e.g. 429 Trial-key rate limit)
+        must NOT propagate — rerank is a refinement step, vector_search
+        already produced a ranked list. On failure, return candidates[:top_n]
+        in their original (similarity) order instead of collapsing the whole
+        retrieval."""
+        class _BoomCohere:
+            def rerank(self, **kwargs):
+                raise RuntimeError(
+                    "status_code: 429 — You are using a Trial key, "
+                    "limited to 10 API calls / minute"
+                )
+
+        monkeypatch.setattr(retriever, "_get_cohere_client", lambda: _BoomCohere())
+        candidates = [
+            {"id": str(i), "payload": {"content": f"c{i}"}} for i in range(10)
+        ]
+
+        out = retriever.rerank("q", candidates, top_n=5)
+
+        # Degrades to vector-search order, does not raise
+        assert out == candidates[:5]
+        captured = capsys.readouterr()
+        assert "rerank 失敗" in captured.out
+        assert "降級" in captured.out
+
+    def test_successful_rerank_attaches_score(self, monkeypatch):
+        """Happy path still works: reranked items keep original fields + rerank_score."""
+        class _FakeResult:
+            def __init__(self, index, score):
+                self.index = index
+                self.relevance_score = score
+
+        class _FakeCohere:
+            def rerank(self, **kwargs):
+                # Return indices in a reordered sequence
+                return type("R", (), {"results": [
+                    _FakeResult(2, 0.9), _FakeResult(0, 0.7),
+                ]})()
+
+        monkeypatch.setattr(retriever, "_get_cohere_client", lambda: _FakeCohere())
+        candidates = [
+            {"id": str(i), "payload": {"content": f"c{i}"}} for i in range(5)
+        ]
+
+        out = retriever.rerank("q", candidates, top_n=2)
+
+        assert len(out) == 2
+        assert out[0]["id"] == "2" and out[0]["rerank_score"] == 0.9
+        assert out[1]["id"] == "0" and out[1]["rerank_score"] == 0.7
+
 
 # ──────────────────────────────────────────────────────────────────────────
 # retrieve_coverage — empty / over-cap / no-results-warning
