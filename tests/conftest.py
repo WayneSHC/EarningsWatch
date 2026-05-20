@@ -27,6 +27,14 @@ def _stub_env(monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.delenv("GROQ_API_KEY", raising=False)
     monkeypatch.delenv("LLM_BACKEND", raising=False)
+    # Neutralise Secret Manager: if a real .env (with GCP_SECRET_PROJECT) is
+    # present in the repo root and gets loaded — e.g. a developer running the
+    # suite locally, or a stray `import tests.benchmark` triggering
+    # load_dotenv() during collection — get_secret() would consult GCP Secret
+    # Manager and resolve REAL keys. That breaks backend-detection tests that
+    # assert "no keys available". Unset it so the suite stays hermetic and
+    # depends only on the dummy env vars above.
+    monkeypatch.delenv("GCP_SECRET_PROJECT", raising=False)
     # Reset detection cache so each test sees the fixture env.
     from src.core import llm_client
     llm_client._detect_backend.cache_clear()

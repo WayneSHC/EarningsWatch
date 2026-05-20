@@ -347,3 +347,91 @@ def test_format_quota_message_unknown_backend_falls_back():
     """未知 backend 不應 KeyError，直接用 backend 名當 label。"""
     out = lc._format_quota_message("future_backend", "quota exceeded")
     assert "future_backend" in out
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# _call_openai_compat — GPT-5 reasoning_effort (spec: llm-backend-cascade)
+# ──────────────────────────────────────────────────────────────────────────
+
+class _FakeCompletions:
+    """Records create() kwargs; returns a configurable fake chat completion."""
+
+    def __init__(self, content="ok"):
+        self._content = content
+        self.last_kwargs = None
+
+    def create(self, **kwargs):
+        self.last_kwargs = kwargs
+        msg = type("M", (), {"content": self._content})()
+        choice = type("C", (), {"message": msg, "finish_reason": "stop"})()
+        usage = type("U", (), {"prompt_tokens": 10, "completion_tokens": 20})()
+        return type("R", (), {"choices": [choice], "usage": usage})()
+
+
+class _FakeOpenAIClient:
+    def __init__(self, content="ok"):
+        completions = _FakeCompletions(content)
+        self.completions = completions
+        self.chat = type("Chat", (), {"completions": completions})()
+
+
+class TestOpenAIReasoningEffort:
+    """Regression: GPT-5 is a reasoning model — max_completion_tokens covers
+    both reasoning AND output. Without reasoning_effort the model can spend
+    the whole budget reasoning and return empty content. _call_openai_compat
+    must pass reasoning_effort for gpt-5* models (and NOT for others).
+    """
+
+    def test_gpt5_passes_reasoning_effort(self, monkeypatch):
+        fake = _FakeOpenAIClient(content='{"ok": true}')
+        monkeypatch.setattr(lc, "_get_openai_client", lambda *a, **kw: fake)
+
+        lc._call_openai_compat("prompt", "gpt-5", 600)
+
+        kwargs = fake.completions.last_kwargs
+        assert kwargs.get("reasoning_effort") == "minimal"
+
+    def test_gpt5_mini_passes_reasoning_effort(self, monkeypatch):
+        fake = _FakeOpenAIClient(content='{"ok": true}')
+        monkeypatch.setattr(lc, "_get_openai_client", lambda *a, **kw: fake)
+
+        lc._call_openai_compat("prompt", "gpt-5-mini", 600)
+
+        assert fake.completions.last_kwargs.get("reasoning_effort") == "minimal"
+
+    def test_non_gpt5_model_omits_reasoning_effort(self, monkeypatch):
+        """gpt-4o is not a reasoning model — passing reasoning_effort would 400."""
+        fake = _FakeOpenAIClient(content="answer")
+        monkeypatch.setattr(lc, "_get_openai_client", lambda *a, **kw: fake)
+
+        lc._call_openai_compat("prompt", "gpt-4o", 600)
+
+        assert "reasoning_effort" not in fake.completions.last_kwargs
+
+    def test_none_content_returns_empty_string_not_crash(self, monkeypatch):
+        """If a reasoning model exhausts its budget, content can be None.
+        _call_openai_compat must coerce to '' rather than raise AttributeError."""
+        fake = _FakeOpenAIClient(content=None)
+        monkeypatch.setattr(lc, "_get_openai_client", lambda *a, **kw: fake)
+
+        text, p_tok, c_tok = lc._call_openai_compat("prompt", "gpt-5", 600)
+
+        assert text == ""
+        assert p_tok == 10 and c_tok == 20
+
+    def test_reasoning_effort_is_configurable(self, monkeypatch):
+        """The effort value comes from module constant `_GPT5_REASONING_EFFORT`
+        (populated from LLM_REASONING_EFFORT at import). Patch the constant
+        directly — reloading the module would corrupt the lru_cache singletons
+        other tests depend on."""
+        monkeypatch.setattr(lc, "_GPT5_REASONING_EFFORT", "low")
+        fake = _FakeOpenAIClient(content="x")
+        monkeypatch.setattr(lc, "_get_openai_client", lambda *a, **kw: fake)
+
+        lc._call_openai_compat("prompt", "gpt-5", 600)
+
+        assert fake.completions.last_kwargs.get("reasoning_effort") == "low"
+
+    def test_reasoning_effort_default_is_minimal(self):
+        """Module default (LLM_REASONING_EFFORT unset) is 'minimal'."""
+        assert lc._GPT5_REASONING_EFFORT == "minimal"
