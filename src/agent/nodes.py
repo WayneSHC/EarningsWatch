@@ -22,12 +22,15 @@ from src.core.retriever import retrieve, get_company_quarters, retrieve_coverage
 from src.core.contradiction import batch_detect, detect_promises, _extract_json
 from src.core.llm_client import chat as llm_chat, friendly_error_message
 from src.core import telemetry
+from src.core.safe import safe_float_env, log_exc
 
 
 # [c] 單次 query 的 LLM 預算上限（USD）；超過則強制結束 retry 迴圈。
 # 預設 0.50 美元 ≈ 一般查詢上限的 5~10 倍，保留 self-reflection 重查空間，
 # 避免 LLM 反覆呼叫導致帳單失控。
-_LLM_BUDGET_USD = float(os.getenv("LLM_BUDGET_USD", "0.50"))
+# [b] 透過 safe_float_env 取值：env 設成非浮點時 fallback 至預設，
+#     避免 module import 階段就因設定錯誤導致整個 app 無法啟動。
+_LLM_BUDGET_USD = safe_float_env("LLM_BUDGET_USD", 0.50, prefix="Nodes")
 
 
 # [A7] 判斷 LLM 生成的「直接回答」是否表達「法說會逐字稿未涵蓋此主題」。
@@ -72,6 +75,13 @@ def _clean_news_snippet(text: str, max_len: int = 180) -> str:
 
 
 def _llm(prompt: str, max_tokens: int = 500) -> str:
+    """LLM 呼叫的測試接縫（test seam）。
+
+    存在的唯一理由：tests/test_nodes.py 以 `monkeypatch.setattr(nodes, "_llm", ...)`
+    替換本函式來注入 stub 回應，避免單元測試打到真實 LLM API。如果直接呼叫
+    `llm_chat`，monkeypatch 必須打到 src.core.llm_client 模組，跨模組替換比較脆弱。
+    保留本層薄包裝讓 agent 層的測試可獨立 mock。
+    """
     return llm_chat(prompt, max_tokens=max_tokens)
 
 
@@ -357,7 +367,7 @@ def parallel_retrieval(state: AgentState) -> dict:
             except Exception as e:
                 # [f] steps_log 會顯示在 UI，只記錄 type.__name__ 防止 API key 片段洩漏
                 _etype = type(e).__name__
-                print(f"[Nodes] [{kind}] 查詢失敗: {_etype}: {e}")
+                log_exc("Nodes", f"[{kind}] 查詢", e)
                 log.append(f"  ⚠ [{kind}] 查詢失敗（{_etype}），不影響其他工具結果")
                 continue
 
@@ -832,7 +842,7 @@ def report_generator(state: AgentState) -> dict:
             except Exception as e:
                 # [f] 只顯示乾淨摘要，原始 SDK 例外（含 HTTP body / trace-id）只進 stdout
                 _msg = friendly_error_message(e)
-                print(f"[Nodes] direct_answer LLM 失敗: {type(e).__name__}: {str(e)[:200]}")
+                log_exc("Nodes", "direct_answer LLM", e)
                 log.append(f"  ⚠ 直接回答生成失敗：{_msg}")
                 sections.append("## 直接回答")
                 sections.append(
@@ -865,7 +875,7 @@ def report_generator(state: AgentState) -> dict:
                 else:
                     log.append("  → 主題未涵蓋 → Tavily 也未取得結果")
             except Exception as e:
-                print(f"[Nodes] off-topic Tavily 失敗: {type(e).__name__}: {e}")
+                log_exc("Nodes", "off-topic Tavily", e)
         # 把新聞提前到主要位置呈現，並附上摘要片段。
         if news:
             sections.append("## 一、網路新聞補充")

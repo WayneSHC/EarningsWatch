@@ -15,6 +15,7 @@ from google.cloud import bigquery
 from src.core.bq_client import get_bq_client, get_table_path
 from src.core.secrets import get_secret
 from src.ingestion.embedder import embed_query_texts, EMBEDDING_MODEL
+from src.core.safe import log_exc
 
 TOP_K_RETRIEVAL = 20
 TOP_K_RERANK = 5
@@ -52,6 +53,11 @@ def _load_min_score_from_env() -> float:
         )
         return _DEFAULT_MIN_SCORE
     return val
+
+def _log_bq_error(where: str, exc: BaseException) -> None:
+    """[b][f] BigQuery 錯誤記錄 — 委派給共享的 log_exc 以保證跨模組訊息一致。"""
+    log_exc("Retriever", f"{where} BigQuery", exc)
+
 
 @lru_cache(maxsize=128)
 def _hyde_expand(query: str) -> str:
@@ -140,21 +146,25 @@ def embed_query(text: str) -> list[float]:
 def clear_retriever_cache() -> None:
     pass  # BigQuery 為 serverless，沒有本地索引需要清空（保留 API 給 ingestion 呼叫）
 
-def _build_where_clause(company: str | None, quarters: list[str] | None, section: str | None) -> tuple[str, dict]:
-    conditions = []
-    params = {}
+def _collect_filter_params(
+    company: str | None,
+    quarters: list[str] | None,
+    section: str | None,
+) -> dict:
+    """Collect non-empty filter values into a dict for BigQuery param binding.
+
+    Returns only the params dict — the actual WHERE clause is built inline
+    in `vector_search` using `base.<column>` references inside VECTOR_SEARCH
+    (filter pushdown — see comment in vector_search).
+    """
+    params: dict = {}
     if company:
-        conditions.append("company = @company")
         params["company"] = company
     if quarters:
-        conditions.append("quarter IN UNNEST(@quarters)")
         params["quarters"] = quarters
     if section:
-        conditions.append("section = @section")
         params["section"] = section
-    
-    where_clause = " AND ".join(conditions) if conditions else "1=1"
-    return where_clause, params
+    return params
 
 def vector_search(
     query: str,
@@ -171,7 +181,7 @@ def vector_search(
     table_path = get_table_path()
     vector = embed_query(_maybe_expand(query))
     
-    where_clause, params_dict = _build_where_clause(company, quarters, section)
+    params_dict = _collect_filter_params(company, quarters, section)
 
     # [b] 在 QueryJobConfig 建構時就一次性傳入完整 params list。
     # 新版 google-cloud-bigquery 的 query_parameters property 回傳的是 list 的副本，
@@ -220,9 +230,16 @@ def vector_search(
     LIMIT {int(top_k)}
     """
     
-    query_job = client.query(sql, job_config=job_config)
-    results = query_job.result()
-    
+    # [b] BQ 失敗時降級回傳 [] 而非 raise：retrieval 為 agent 上游節點，
+    #     若 raise 會炸到 UI；返回 [] 讓 self_reflect 的 coverage-driven
+    #     retry plan 自然偵測 weak quarters 並重試。
+    try:
+        query_job = client.query(sql, job_config=job_config)
+        results = query_job.result()
+    except Exception as e:
+        _log_bq_error("vector_search", e)
+        return []
+
     hits = []
     for row in results:
         # Cosine distance in BQ -> Cosine similarity = 1 - distance
@@ -237,7 +254,7 @@ def vector_search(
             "chunk_index": row.chunk_index,
         }
         hits.append({"id": row.id, "score": score, "payload": payload})
-        
+
     return hits
 
 def rerank(query: str, candidates: list[dict], top_n: int = TOP_K_RERANK) -> list[dict]:
@@ -302,9 +319,14 @@ def get_company_quarters(company: str) -> list[str]:
             bigquery.ScalarQueryParameter("company", "STRING", company),
         ]
     )
-    query_job = client.query(sql, job_config=job_config)
-    results = query_job.result()
-    
+    # [b] BQ 失敗時降級回傳 []：UI 的季度下拉選單會空，但服務不會掛。
+    try:
+        query_job = client.query(sql, job_config=job_config)
+        results = query_job.result()
+    except Exception as e:
+        _log_bq_error("get_company_quarters", e)
+        return []
+
     quarters = [row.quarter for row in results if row.quarter]
     return sorted(quarters, key=lambda x: (x[:4], x[4:]))
 
@@ -375,9 +397,15 @@ def retrieve_coverage(
         ]
     )
     
-    query_job = client.query(sql, job_config=job_config)
-    results = query_job.result()
-    
+    # [b] coverage sweep 失敗時降級回傳 {}：呼叫端 parallel_retrieval 會
+    #     視為「補不到任何缺漏」，把已有的 main retrieval 結果交給下游 LLM。
+    try:
+        query_job = client.query(sql, job_config=job_config)
+        results = query_job.result()
+    except Exception as e:
+        _log_bq_error("retrieve_coverage", e)
+        return {}
+
     # 組合各季度的 chunks
     raw_results = {}
     for row in results:
