@@ -432,7 +432,8 @@ def _format_quota_message(backend: str, msg: str) -> str:
         return f"⚠️  {label} 模型名稱不存在或已下線，切換下一個後端…"
     if any(m in msg_lower for m in ("503", "service unavailable", "overloaded")):
         return f"⚠️  {label} 服務暫時不可用，切換下一個後端…"
-    return f"⚠️  {label} 呼叫失敗（{msg[:80]}），切換下一個後端…"
+    # [f] 不回傳 raw msg 片段，避免 API error body 洩漏到 server log
+    return f"⚠️  {label} 呼叫失敗，切換下一個後端…"
 
 
 def chat(prompt: str, max_tokens: int = 600, mode: str = "demo") -> str:

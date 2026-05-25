@@ -435,3 +435,310 @@ class TestOpenAIReasoningEffort:
     def test_reasoning_effort_default_is_minimal(self):
         """Module default (LLM_REASONING_EFFORT unset) is 'minimal'."""
         assert lc._GPT5_REASONING_EFFORT == "minimal"
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# friendly_error_message — auth / 404 / 503 branches (lines 127, 130, 133)
+# ──────────────────────────────────────────────────────────────────────────
+
+class TestFriendlyErrorMessageBranches:
+    def test_401_auth_failure(self):
+        out = lc.friendly_error_message(RuntimeError("401 Unauthorized"))
+        assert "API Key 無效或權限不足" in out
+
+    def test_403_auth_failure(self):
+        out = lc.friendly_error_message(RuntimeError("403 Forbidden"))
+        assert "API Key 無效或權限不足" in out
+
+    def test_404_model_not_found(self):
+        out = lc.friendly_error_message(RuntimeError("404 not_found the model"))
+        assert "模型不存在或已下線" in out
+
+    def test_503_service_unavailable(self):
+        out = lc.friendly_error_message(RuntimeError("503 service unavailable"))
+        assert "服務暫時不可用" in out
+
+    def test_timeout_service_unavailable(self):
+        out = lc.friendly_error_message(RuntimeError("connection timed out"))
+        assert "服務暫時不可用" in out
+
+    def test_unknown_error_generic_fallback(self):
+        out = lc.friendly_error_message(RuntimeError("unexpected internal error"))
+        assert "LLM 呼叫失敗" in out
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# get_model_name (lines 189-190)
+# ──────────────────────────────────────────────────────────────────────────
+
+class TestGetModelName:
+    def test_returns_demo_model_for_primary_backend(self, monkeypatch):
+        lc._detect_backend.cache_clear()
+        name = lc.get_model_name("demo")
+        assert isinstance(name, str)
+        assert len(name) > 0
+
+    def test_returns_dev_model(self, monkeypatch):
+        lc._detect_backend.cache_clear()
+        name = lc.get_model_name("dev")
+        assert isinstance(name, str)
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# _call_gemini (lines 284-300)
+# ──────────────────────────────────────────────────────────────────────────
+
+def _make_gemini_client(text="gemini reply", p_tok=5, c_tok=10):
+    import types as _types
+
+    class _Meta:
+        prompt_token_count = p_tok
+        candidates_token_count = c_tok
+
+    class _Resp:
+        pass
+
+    resp = _Resp()
+    resp.text = text
+    resp.usage_metadata = _Meta()
+
+    class _Models:
+        def generate_content(self, model, contents, config):
+            return resp
+
+    client = _types.SimpleNamespace(models=_Models())
+    return client
+
+
+class TestCallGemini:
+    def test_returns_text_and_tokens(self, monkeypatch):
+        monkeypatch.setattr(lc, "_get_gemini_client", lambda: _make_gemini_client())
+        text, p, c = lc._call_gemini("prompt", "gemini-2.5-flash", 200)
+        assert text == "gemini reply"
+        assert p == 5 and c == 10
+
+    def test_none_text_coerced_to_empty(self, monkeypatch):
+        monkeypatch.setattr(lc, "_get_gemini_client", lambda: _make_gemini_client(text=None))
+        text, _, _ = lc._call_gemini("prompt", "gemini-2.5-flash", 200)
+        assert text == ""
+
+    def test_missing_usage_metadata_returns_zeros(self, monkeypatch):
+        import types as _types
+        class _Resp:
+            text = "ok"
+            usage_metadata = None
+        client = _types.SimpleNamespace(models=_types.SimpleNamespace(
+            generate_content=lambda **kw: _Resp()
+        ))
+        # Use a simpler mock that matches the actual call signature
+        class _Models:
+            def generate_content(self, model, contents, config):
+                return _Resp()
+        client2 = _types.SimpleNamespace(models=_Models())
+        monkeypatch.setattr(lc, "_get_gemini_client", lambda: client2)
+        text, p, c = lc._call_gemini("prompt", "gemini-2.5-flash", 200)
+        assert text == "ok"
+        assert p == 0 and c == 0
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# _call_anthropic (lines 305-320)
+# ──────────────────────────────────────────────────────────────────────────
+
+def _make_anthropic_client(reply="anthropic reply", p_tok=7, c_tok=12):
+    import types as _types
+
+    block = _types.SimpleNamespace(type="text", text=reply)
+    usage = _types.SimpleNamespace(input_tokens=p_tok, output_tokens=c_tok)
+    resp = _types.SimpleNamespace(content=[block], usage=usage)
+
+    class _Messages:
+        def create(self, model, max_tokens, messages):
+            return resp
+
+    return _types.SimpleNamespace(messages=_Messages())
+
+
+class TestCallAnthropic:
+    def test_returns_text_and_tokens(self, monkeypatch):
+        monkeypatch.setattr(lc, "_get_anthropic_client", lambda: _make_anthropic_client(reply="anthropic reply"))
+        text, p, c = lc._call_anthropic("prompt", "claude-sonnet-4-6", 200)
+        assert text == "anthropic reply"
+        assert p == 7 and c == 12
+
+    def test_empty_content_list_returns_empty(self, monkeypatch):
+        import types as _types
+
+        class _Resp:
+            content = []
+            usage = None
+
+        class _Messages:
+            def create(self, model, max_tokens, messages):
+                return _Resp()
+
+        monkeypatch.setattr(
+            lc, "_get_anthropic_client",
+            lambda: _types.SimpleNamespace(messages=_Messages()),
+        )
+        text, p, c = lc._call_anthropic("prompt", "claude-haiku-4-5", 200)
+        assert text == ""
+        assert p == 0 and c == 0
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# _call_cohere (lines 325-344)
+# ──────────────────────────────────────────────────────────────────────────
+
+def _make_cohere_client(text="cohere reply", p_tok=8, c_tok=15, include_meta=True):
+    import types as _types
+
+    class _Tokens:
+        input_tokens = p_tok
+        output_tokens = c_tok
+
+    class _Meta:
+        tokens = _Tokens()
+
+    class _Resp:
+        pass
+
+    resp = _Resp()
+    resp.text = text
+    resp.meta = _Meta() if include_meta else None
+
+    class _Client:
+        def chat(self, model, message, max_tokens):
+            return resp
+
+    return _Client()
+
+
+class TestCallCohere:
+    def test_returns_text_and_tokens(self, monkeypatch):
+        monkeypatch.setattr(lc, "_get_cohere_llm_client", lambda: _make_cohere_client())
+        text, p, c = lc._call_cohere("prompt", "command-r-plus-08-2024", 200)
+        assert text == "cohere reply"
+        assert p == 8 and c == 15
+
+    def test_no_meta_returns_zero_tokens(self, monkeypatch):
+        monkeypatch.setattr(
+            lc, "_get_cohere_llm_client",
+            lambda: _make_cohere_client(include_meta=False),
+        )
+        text, p, c = lc._call_cohere("prompt", "command-r-plus-08-2024", 200)
+        assert text == "cohere reply"
+        assert p == 0 and c == 0
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# _dispatch (lines 351-359)
+# ──────────────────────────────────────────────────────────────────────────
+
+class TestDispatch:
+    def test_routes_gemini(self, monkeypatch):
+        monkeypatch.setattr(lc, "_call_gemini", lambda p, m, t: ("g", 1, 2))
+        assert lc._dispatch("gemini", "x", "model", 100) == ("g", 1, 2)
+
+    def test_routes_anthropic(self, monkeypatch):
+        monkeypatch.setattr(lc, "_call_anthropic", lambda p, m, t: ("a", 3, 4))
+        assert lc._dispatch("anthropic", "x", "model", 100) == ("a", 3, 4)
+
+    def test_routes_cohere(self, monkeypatch):
+        monkeypatch.setattr(lc, "_call_cohere", lambda p, m, t: ("c", 5, 6))
+        assert lc._dispatch("cohere", "x", "model", 100) == ("c", 5, 6)
+
+    def test_unknown_backend_raises(self):
+        with pytest.raises(ValueError, match="未知的 LLM 後端"):
+            lc._dispatch("nonexistent", "x", "model", 100)
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# _call_openai_compat — TypeError / msg-based retry paths (lines 259-272)
+# ──────────────────────────────────────────────────────────────────────────
+
+class _FailFirstThenSucceedCompletions:
+    """Raises TypeError on first call (simulating old SDK), succeeds on second."""
+    def __init__(self):
+        self._calls = 0
+
+    def create(self, **kwargs):
+        self._calls += 1
+        if self._calls == 1 and "max_completion_tokens" in kwargs:
+            raise TypeError("unexpected keyword argument 'max_completion_tokens'")
+        msg = type("M", (), {"content": "fallback"})()
+        choice = type("C", (), {"message": msg})()
+        usage = type("U", (), {"prompt_tokens": 1, "completion_tokens": 2})()
+        return type("R", (), {"choices": [choice], "usage": usage})()
+
+
+class TestCallOpenAICompatRetry:
+    def test_typeerror_falls_back_to_max_tokens(self, monkeypatch):
+        completions = _FailFirstThenSucceedCompletions()
+        fake = type("FC", (), {"chat": type("Ch", (), {"completions": completions})()})()
+        monkeypatch.setattr(lc, "_get_openai_client", lambda *a, **kw: fake)
+        text, p, c = lc._call_openai_compat("prompt", "gpt-4o", 600)
+        assert text == "fallback"
+        assert completions._calls == 2
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# which_backend (lines 560-565)
+# ──────────────────────────────────────────────────────────────────────────
+
+class TestWhichBackend:
+    def test_returns_string_with_backend_label(self, monkeypatch):
+        lc._detect_backend.cache_clear()
+        out = lc.which_backend()
+        assert isinstance(out, str)
+        assert len(out) > 0
+
+    def test_returns_error_string_when_no_keys(self, monkeypatch):
+        for k in ("OPENAI_API_KEY", "GEMINI_API_KEY", "COHERE_API_KEY"):
+            monkeypatch.delenv(k, raising=False)
+        monkeypatch.delenv("LLM_BACKEND", raising=False)
+        lc._detect_backend.cache_clear()
+        out = lc.which_backend()
+        # Should return error string, not raise
+        assert isinstance(out, str)
+        assert len(out) > 0
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# chat() — transient retry path (lines 466-471, 515-521)
+# ──────────────────────────────────────────────────────────────────────────
+
+class TestChatTransientRetry:
+    def test_transient_error_retries_same_backend(self, monkeypatch, capsys):
+        """TimeoutError triggers same-backend retry before switching."""
+        attempts = []
+
+        def fake_dispatch(backend, prompt, model, max_tokens):
+            attempts.append(backend)
+            if backend == "gemini" and len([a for a in attempts if a == "gemini"]) == 1:
+                raise TimeoutError("connection timeout")
+            return "ok", 0, 0
+
+        monkeypatch.setattr(lc, "_dispatch", fake_dispatch)
+        # Avoid real sleep
+        monkeypatch.setattr(lc.time, "sleep", lambda _: None)
+        out = lc.chat("ping")
+        assert out == "ok"
+        # gemini should appear twice (first attempt + retry), then success
+        assert attempts.count("gemini") >= 2
+
+    def test_transient_exhausted_switches_backend(self, monkeypatch, capsys):
+        """After all retries on the primary backend, cascades to next backend."""
+        attempts = []
+
+        def fake_dispatch(backend, prompt, model, max_tokens):
+            attempts.append(backend)
+            if backend == "gemini":
+                raise TimeoutError("always times out")
+            return "fallback ok", 0, 0
+
+        monkeypatch.setattr(lc, "_dispatch", fake_dispatch)
+        monkeypatch.setattr(lc.time, "sleep", lambda _: None)
+        out = lc.chat("ping")
+        assert out == "fallback ok"
+        assert "openai" in attempts

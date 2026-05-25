@@ -108,14 +108,20 @@ def get_client_ip() -> str:
         return ""
 
     # X-Forwarded-For 格式：「client, proxy1, proxy2」→ 取第一個
+    # [f] 只接受合法 IPv4/IPv6 字元，防止 header 偽造注入任意字串作為 key
+    import re as _re
+    _IP_RE = _re.compile(r"^[0-9a-fA-F.:]+$")
+
     xff = headers.get("X-Forwarded-For", "") or headers.get("x-forwarded-for", "")
     if xff:
         ip = xff.split(",")[0].strip()
-        if ip:
+        if ip and _IP_RE.match(ip):
             return ip
 
     real = headers.get("X-Real-IP", "") or headers.get("x-real-ip", "")
     if real:
-        return real.strip()
+        real = real.strip()
+        if _IP_RE.match(real):
+            return real
 
     return ""
