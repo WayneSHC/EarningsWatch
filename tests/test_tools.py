@@ -152,7 +152,11 @@ class TestSearchNews:
 
         assert out == []
         captured = capsys.readouterr()
-        assert "Tavily 搜尋失敗" in captured.out
+        # log_exc format: "[Tools] ⚠ Tavily 搜尋 失敗（RuntimeError: API down）"
+        # Assert on stable substrings — the where-label and the exception type —
+        # so future format tweaks in src/core/safe.log_exc don't break this test.
+        assert "Tavily 搜尋" in captured.out
+        assert "RuntimeError" in captured.out
 
 
 # ──────────────────────────────────────────────────────────────────────────
