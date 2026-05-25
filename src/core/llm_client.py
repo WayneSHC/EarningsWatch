@@ -22,12 +22,15 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from functools import lru_cache
 
 from src.core import telemetry
+from src.core.safe import safe_int_env
 
 # ── [b] 逐呼叫 Timeout 設定 ────────────────────────────────────────────────────
-_DEFAULT_TIMEOUT_SEC = int(os.getenv("LLM_TIMEOUT_SECONDS", "45"))
+# [b] 透過 safe_int_env：非整數 env 不該炸 module import（會連帶整個 LLM 子系統
+#     與 Streamlit app 無法啟動）。
+_DEFAULT_TIMEOUT_SEC = safe_int_env("LLM_TIMEOUT_SECONDS", 45, prefix="LLM")
 
 # ── [c] 全域共用 ThreadPoolExecutor ───────────────────────────────────────────
-_LLM_POOL_WORKERS = int(os.getenv("LLM_POOL_WORKERS", "8"))
+_LLM_POOL_WORKERS = safe_int_env("LLM_POOL_WORKERS", 8, prefix="LLM")
 _LLM_TIMEOUT_POOL = ThreadPoolExecutor(max_workers=_LLM_POOL_WORKERS)
 atexit.register(_LLM_TIMEOUT_POOL.shutdown, wait=False)
 
@@ -524,10 +527,12 @@ def chat(prompt: str, max_tokens: int = 600, mode: str = "demo") -> str:
 
     # 所有候選都失敗 → 給 stdout 印詳細錯誤（給 dev 看），對 caller raise 簡潔例外（給 UI 看）
     if last_err is not None:
+        # [f] 截斷至 120 字與 src.core.safe.log_exc 對齊，避免 SDK 例外訊息
+        #     含 trace-id / endpoint / key 片段洩漏到 stdout / Streamlit logs。
         log_msg = (
             "❌ 所有 LLM 後端都失敗（OpenAI / Gemini / Cohere 皆無法回應）。\n"
             "可能原因：所有 API Key 配額同時用完、網路中斷、或服務全面異常。\n"
-            f"最後一次錯誤：{type(last_err).__name__}: {str(last_err)[:200]}"
+            f"最後一次錯誤：{type(last_err).__name__}: {str(last_err)[:120]}"
         )
     else:
         log_msg = "[LLM] 所有後端都失敗"
