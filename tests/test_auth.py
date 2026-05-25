@@ -11,6 +11,7 @@ Covers the app-auth capability spec:
   - 5th wrong password → lockout timestamp set, lockout error shown
   - Successful login after prior failures → fail count cleared
   - hmac.compare_digest used (timing-safe, not ==)
+  - IP-based lockout persists across new sessions (cross-session test)
 """
 
 from __future__ import annotations
@@ -262,3 +263,82 @@ class TestTimingSafe:
         # (The source may contain == for other comparisons, but not for pwd)
         assert "pwd ==" not in source
         assert "pwd is " not in source
+
+
+# ── IP-based lockout: cross-session persistence ───────────────────────────
+
+class TestIpBasedLockout:
+    def setup_method(self):
+        from src.core import rate_limiter
+        rate_limiter.auth_reset()  # ensure clean IP state before each test
+
+    def teardown_method(self):
+        from src.core import rate_limiter
+        rate_limiter.auth_reset()
+
+    def test_ip_lockout_persists_to_new_session(self, monkeypatch):
+        """Lockout set via IP-based store is visible even after session state is cleared."""
+        import streamlit as st
+        from src.core import rate_limiter
+
+        TEST_IP = "203.0.113.42"
+        monkeypatch.setattr("src.ui.auth.get_client_ip", lambda: TEST_IP)
+        monkeypatch.setattr("src.ui.auth.get_secret", lambda _: "secret")
+
+        calls = _patch_st(monkeypatch, password_input="wrong", button_clicked=True)
+
+        from src.ui import auth
+
+        # Exhaust all 5 attempts via IP store
+        for _ in range(_MAX_ATTEMPTS - 1):
+            try:
+                auth.require_password()
+            except _Stop:
+                pass
+
+        # 5th attempt triggers lockout
+        try:
+            auth.require_password()
+        except _Stop:
+            pass
+
+        assert rate_limiter.auth_fail_count(TEST_IP) == _MAX_ATTEMPTS
+        assert rate_limiter.auth_lockout_until(TEST_IP) > time.time()
+
+        # Simulate new session: clear session state but keep IP store intact
+        for k in ("_authenticated", "_pwd_fail_count", "_pwd_lockout_until"):
+            st.session_state.pop(k, None)
+
+        # New session with same IP should still be locked out
+        calls2 = _patch_st(monkeypatch, password_input="wrong", button_clicked=False)
+        with pytest.raises(_Stop):
+            auth.require_password()
+
+        assert calls2.stop_count == 1
+        assert any("秒後再試" in m for m in calls2.error_msgs)
+
+    def test_successful_login_clears_ip_store(self, monkeypatch):
+        """Correct password clears the IP fail counter, not just session state."""
+        from src.core import rate_limiter
+
+        TEST_IP = "203.0.113.99"
+        monkeypatch.setattr("src.ui.auth.get_client_ip", lambda: TEST_IP)
+        monkeypatch.setattr("src.ui.auth.get_secret", lambda _: "correct")
+
+        # Pre-seed 2 failures in IP store
+        rate_limiter.auth_record_fail(TEST_IP, _MAX_ATTEMPTS, 300)
+        rate_limiter.auth_record_fail(TEST_IP, _MAX_ATTEMPTS, 300)
+        assert rate_limiter.auth_fail_count(TEST_IP) == 2
+
+        _patch_st(monkeypatch, password_input="correct", button_clicked=True)
+        from src.ui import auth
+        try:
+            auth.require_password()
+        except _Stop:
+            pass
+
+        assert rate_limiter.auth_fail_count(TEST_IP) == 0
+
+
+# expose _MAX_ATTEMPTS so the cross-session test can use it
+from src.ui.auth import _MAX_ATTEMPTS

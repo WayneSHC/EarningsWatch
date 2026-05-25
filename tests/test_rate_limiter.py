@@ -138,3 +138,65 @@ class TestGetClientIP:
             headers = {"X-Forwarded-For": "  ", "X-Real-IP": "198.51.100.7"}
         monkeypatch.setattr(st, "context", _Ctx(), raising=False)
         assert rl.get_client_ip() == "198.51.100.7"
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# _AuthStore / auth_* module functions
+# ──────────────────────────────────────────────────────────────────────────
+
+class TestAuthStore:
+    def setup_method(self):
+        rl.auth_reset()  # clear between tests
+
+    def test_initial_fail_count_is_zero(self):
+        assert rl.auth_fail_count("1.2.3.4") == 0
+
+    def test_initial_lockout_until_is_zero(self):
+        assert rl.auth_lockout_until("1.2.3.4") == 0.0
+
+    def test_record_fail_increments_count(self):
+        count, _ = rl.auth_record_fail("1.2.3.4", max_attempts=5, lockout_seconds=300)
+        assert count == 1
+        assert rl.auth_fail_count("1.2.3.4") == 1
+
+    def test_record_fail_accumulates(self):
+        for _ in range(3):
+            rl.auth_record_fail("1.2.3.4", max_attempts=5, lockout_seconds=300)
+        assert rl.auth_fail_count("1.2.3.4") == 3
+
+    def test_fifth_fail_sets_lockout(self):
+        import time
+        before = time.time()
+        for _ in range(4):
+            rl.auth_record_fail("1.2.3.4", max_attempts=5, lockout_seconds=300)
+        count, until = rl.auth_record_fail("1.2.3.4", max_attempts=5, lockout_seconds=300)
+        assert count == 5
+        assert until >= before + 290
+        assert rl.auth_lockout_until("1.2.3.4") >= before + 290
+
+    def test_below_max_does_not_set_lockout(self):
+        rl.auth_record_fail("1.2.3.4", max_attempts=5, lockout_seconds=300)
+        assert rl.auth_lockout_until("1.2.3.4") == 0.0
+
+    def test_empty_ip_is_noop(self):
+        count, until = rl.auth_record_fail("", max_attempts=5, lockout_seconds=300)
+        assert count == 0 and until == 0.0
+
+    def test_ips_are_independent(self):
+        rl.auth_record_fail("1.1.1.1", max_attempts=5, lockout_seconds=300)
+        rl.auth_record_fail("1.1.1.1", max_attempts=5, lockout_seconds=300)
+        assert rl.auth_fail_count("2.2.2.2") == 0
+
+    def test_reset_clears_specific_ip(self):
+        rl.auth_record_fail("1.2.3.4", max_attempts=5, lockout_seconds=300)
+        rl.auth_record_fail("5.6.7.8", max_attempts=5, lockout_seconds=300)
+        rl.auth_reset("1.2.3.4")
+        assert rl.auth_fail_count("1.2.3.4") == 0
+        assert rl.auth_fail_count("5.6.7.8") == 1
+
+    def test_reset_all_clears_everything(self):
+        rl.auth_record_fail("1.2.3.4", max_attempts=5, lockout_seconds=300)
+        rl.auth_record_fail("5.6.7.8", max_attempts=5, lockout_seconds=300)
+        rl.auth_reset()
+        assert rl.auth_fail_count("1.2.3.4") == 0
+        assert rl.auth_fail_count("5.6.7.8") == 0
