@@ -272,6 +272,15 @@ Place PDFs in `data/raw_pdfs/`. Processed state is tracked in `data/processed/in
 return html.escape(str(val)) if val is not None else ""
 ```
 
+註釋標籤總表：
+- `# [f]` — 安全控制（XSS、prompt injection、輸入白名單、錯誤訊息截斷等）
+- `# [b]` — 容錯設計（fallback、try/except、型別驗證、降級回傳值）
+- `# [c]` — 效能優化（並行 I/O、快取、截斷、跳過低值工作）
+- `# [R#]` — 對應到 `specs/<feature>/spec.md` 的 Functional Requirement 編號
+  （例如 `# [R5]` 對應 `FR-005`）。新程式碼建議直接使用 `# [FR-005]` 全名以利檢索；
+  舊式 `[R#]` 為過渡期保留。孤立、無對應 spec 條目的 `[R#]` 應於 review 時
+  改為散文說明或刪除。
+
 ### e. 能解釋每一行程式碼
 
 關鍵設計選擇說明：
@@ -299,3 +308,8 @@ LangGraph 預設後節點的 state key 會覆蓋前節點。`Annotated[list, ope
 | **Token 爆炸攻擊** | LLM prompt 內容截斷（每季 2000 字上限） | `contradiction.py` `_MAX_CONTENT` |
 | **Qdrant 注入** | 公司名稱只能從 COMPANIES 列表取得，不允許任意字串 filter | `app.py` 白名單驗證 |
 | **投資建議責任** | UI 明顯標示「不提供選股建議」+ 頁腳免責聲明 | `app.py` sidebar + footer |
+
+<!-- SPECKIT START -->
+For additional context about technologies to be used, project structure,
+shell commands, and other important information, read the current plan
+<!-- SPECKIT END -->

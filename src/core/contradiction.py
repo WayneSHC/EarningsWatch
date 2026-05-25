@@ -56,6 +56,38 @@ _BOILERPLATE_SIGNATURES = (
 _BOILERPLATE_NORMALIZED = tuple("".join(s.split()) for s in _BOILERPLATE_SIGNATURES)
 
 
+def _safe_int_env(name: str, default: int) -> int:
+    """[b] 從環境變數讀整數，非法值（空字串 / 非數字）退回 default 並警告。
+
+    `int(os.getenv(...))` 直接呼叫在 env 設成非整數時會 raise ValueError，
+    讓單一外部設定錯誤癱瘓整個 batch。本 helper 統一安全 fallback。
+    """
+    raw = os.getenv(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        print(f"[Contradiction] ⚠ {name}={raw!r} 非整數，回退預設 {default}")
+        return default
+
+
+def _sanitize_topic(topic: str) -> str:
+    """[f] 防 prompt injection：剝除可逸出 prompt 內「」引號 / fence / 換行的字元。
+
+    UI 層已限制長度 + html.escape，但 Constitution Principle VI 要求 core
+    模組亦不得仰賴上游清洗。本函式做最小必要清理：
+      - 移除中文引號 「」 → 攻擊者無法逸出 prompt 內的引述區塊
+      - 移除 ``` → 攻擊者無法插入新的 markdown fence 誘導 LLM 解析
+      - 摺疊換行 / tab → 攻擊者無法插入「\\n忽略前述指示」風格段落
+    """
+    if not topic:
+        return ""
+    cleaned = topic.replace("「", "").replace("」", "").replace("```", "")
+    cleaned = " ".join(cleaned.split())  # 摺疊所有空白
+    return cleaned.strip()
+
+
 def _is_boilerplate(text: str) -> bool:
     """偵測是否為法律免責聲明 boilerplate（大小寫不敏感、忽略空白與排版差異）。
 
@@ -305,7 +337,8 @@ def batch_detect(
         - content 截斷至 _MAX_CONTENT 字，防止 token 超限
     """
     # [b] 防呆：topic 非字串時強制轉換
-    topic = str(topic).strip() if topic else ""
+    # [f] prompt injection 防禦：剝除引號 / fence / 換行（見 _sanitize_topic）
+    topic = _sanitize_topic(str(topic) if topic else "")
 
     quarters = sorted(statements_by_quarter.keys())
 
@@ -426,7 +459,7 @@ def batch_detect(
     # [c] 並行 LLM 呼叫：LLM API 為 I/O-bound，ThreadPoolExecutor 可有效縮短總等待時間。
     # [b] max_workers=2：Gemini 免費層 RPM 緊（2.5-flash 約 10 RPM），加上 decomposer/judge
     #     /tool router 等其他 LLM 呼叫，並行度太高會立刻觸發 429。可由環境變數覆寫。
-    _workers = min(len(pairs), int(os.getenv("LLM_PAIR_WORKERS", "2")))
+    _workers = min(len(pairs), _safe_int_env("LLM_PAIR_WORKERS", 2))
     raw_results: dict[int, dict] = {}
     with ThreadPoolExecutor(max_workers=_workers) as pool:
         futures = {pool.submit(_detect_pair, p): idx for idx, p in enumerate(pairs)}
@@ -509,7 +542,7 @@ def detect_promises(chunks_by_quarter: dict[str, list[dict]], topic: str) -> lis
             return None
 
     # [c] 並行 LLM 呼叫（與 batch_detect 一致），保守 max_workers 避免 Gemini 免費層 RPM
-    _workers = min(len(tasks), int(os.getenv("LLM_PAIR_WORKERS", "2")))
+    _workers = min(len(tasks), _safe_int_env("LLM_PAIR_WORKERS", 2))
     indexed: dict[int, dict] = {}
     with ThreadPoolExecutor(max_workers=_workers) as pool:
         futures = {pool.submit(_run_promise, t): idx for idx, t in enumerate(tasks)}
