@@ -146,11 +146,15 @@ class TestResolveCjkFont:
 # to_pdf_single — only run if a CJK font is locally available
 # ──────────────────────────────────────────────────────────────────────────
 
+def _skip_no_font():
+    if export_mod._resolve_cjk_font() is None:
+        pytest.skip("No CJK font installed locally; PDF emission cannot be tested.")
+
+
 class TestPdfSingle:
     def test_emits_valid_pdf_bytes_when_font_available(self):
         """If a CJK font is found on the machine, the export must emit PDF bytes."""
-        if export_mod._resolve_cjk_font() is None:
-            pytest.skip("No CJK font installed locally; PDF emission cannot be tested.")
+        _skip_no_font()
 
         result = {
             "contradictions": [],
@@ -159,6 +163,166 @@ class TestPdfSingle:
             "final_report": "報告內容",
         }
         out = export_mod.to_pdf_single(result, "台積電", "AI需求")
+
+        assert isinstance(out, bytes)
+        assert out.startswith(b"%PDF-")
+
+    def test_pdf_with_contradictions_and_promises(self):
+        """PDF is generated when contradictions and promises are non-empty."""
+        _skip_no_font()
+
+        result = {
+            "contradictions": [
+                {
+                    "quarter_a": "2024Q1",
+                    "quarter_b": "2024Q2",
+                    "analysis": {
+                        "stance_change": "更樂觀",
+                        "has_contradiction": True,
+                        "change_detail": "毛利率上揚",
+                        "evidence_early": "本季毛利率 50%",
+                        "evidence_later": "本季毛利率 53%",
+                        "follow_up_question": "未來趨勢？",
+                    },
+                },
+                {
+                    "quarter_a": "2024Q2",
+                    "quarter_b": "2024Q3",
+                    "analysis": {
+                        "stance_change": "無關",
+                        "has_contradiction": False,
+                        "change_detail": "",
+                        "evidence_early": "",
+                        "evidence_later": "",
+                        "follow_up_question": "",
+                    },
+                },
+            ],
+            "promises": [
+                {
+                    "promise_quarter": "2024Q1",
+                    "content": "毛利率維持 53%",
+                    "followup_quarter": "2024Q2",
+                    "status": "✅ 達標",
+                    "detail": "如期達成",
+                },
+            ],
+            "confidence": 0.80,
+            "final_report": "詳細分析報告",
+        }
+        out = export_mod.to_pdf_single(result, "台積電", "毛利率")
+
+        assert isinstance(out, bytes)
+        assert out.startswith(b"%PDF-")
+
+    def test_pdf_with_contradictions_no_promises(self):
+        """PDF renders contradiction section even when promises list is empty."""
+        _skip_no_font()
+
+        result = {
+            "contradictions": [
+                {
+                    "quarter_a": "2024Q3",
+                    "quarter_b": "2024Q4",
+                    "analysis": {
+                        "stance_change": "更保守",
+                        "has_contradiction": True,
+                        "change_detail": "展望調降",
+                        "evidence_early": "需求強勁",
+                        "evidence_later": "庫存調整",
+                        "follow_up_question": "",
+                    },
+                }
+            ],
+            "promises": [],
+            "confidence": 0.70,
+            "final_report": "季度分析",
+        }
+        out = export_mod.to_pdf_single(result, "聯發科", "展望")
+
+        assert isinstance(out, bytes)
+        assert out.startswith(b"%PDF-")
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# to_pdf_compare — multi-company PDF
+# ──────────────────────────────────────────────────────────────────────────
+
+class TestPdfCompare:
+    def test_emits_valid_pdf_bytes(self):
+        """to_pdf_compare produces valid PDF bytes from multi-company results."""
+        _skip_no_font()
+
+        multi_results = {
+            "台積電": {
+                "confidence": 0.85,
+                "contradictions": [
+                    {
+                        "quarter_a": "2024Q1",
+                        "quarter_b": "2024Q2",
+                        "analysis": {"stance_change": "更樂觀", "has_contradiction": True},
+                    }
+                ],
+                "final_report": "台積電報告",
+            },
+            "聯發科": {
+                "confidence": 0.75,
+                "contradictions": [],
+                "final_report": "聯發科報告",
+            },
+        }
+        comparison_table = [
+            {"quarter_pair": "2024Q1 vs 2024Q2", "台積電": "更樂觀", "聯發科": "維持不變"},
+        ]
+        out = export_mod.to_pdf_compare(
+            multi_results,
+            comparison_table,
+            "AI 需求前景差異摘要",
+            ["台積電", "聯發科"],
+            "AI 需求",
+        )
+
+        assert isinstance(out, bytes)
+        assert out.startswith(b"%PDF-")
+
+    def test_pdf_compare_skips_error_companies(self):
+        """Companies with 'error' key are skipped in the per-company section."""
+        _skip_no_font()
+
+        multi_results = {
+            "台積電": {"confidence": 0.9, "contradictions": [], "final_report": "台積電"},
+            "聯發科": {"error": "agent failed", "contradictions": [], "final_report": ""},
+        }
+        out = export_mod.to_pdf_compare(
+            multi_results,
+            [],
+            "",
+            ["台積電", "聯發科"],
+            "毛利率",
+        )
+
+        assert isinstance(out, bytes)
+        assert out.startswith(b"%PDF-")
+
+    def test_pdf_compare_with_colored_table_rows(self):
+        """Comparison table rows with 更樂觀/更保守 trigger color fill without crashing."""
+        _skip_no_font()
+
+        multi_results = {
+            "A": {"confidence": 0.8, "contradictions": [], "final_report": "A"},
+            "B": {"confidence": 0.7, "contradictions": [], "final_report": "B"},
+        }
+        comparison_table = [
+            {"quarter_pair": "2024Q1 vs 2024Q2", "A": "更樂觀", "B": "更保守"},
+            {"quarter_pair": "2024Q2 vs 2024Q3", "A": "維持不變", "B": "維持不變"},
+        ]
+        out = export_mod.to_pdf_compare(
+            multi_results,
+            comparison_table,
+            "差異摘要文字",
+            ["A", "B"],
+            "展望",
+        )
 
         assert isinstance(out, bytes)
         assert out.startswith(b"%PDF-")

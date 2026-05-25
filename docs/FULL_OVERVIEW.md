@@ -109,14 +109,14 @@ data/raw_pdfs/
 EarningsWatch/
 ├── src/
 │   ├── agent/          # graph.py, nodes.py, state.py, tools.py
-│   ├── core/           # llm_client, qdrant_client, retriever,
-│   │                   # contradiction, comparison
+│   ├── core/           # llm_client, bq_client, retriever,
+│   │                   # contradiction, comparison, secrets, telemetry
 │   ├── ingestion/      # smart_parser, chunker, embedder
-│   └── ui/             # app.py, chart.py, export.py,
-│                       # cache.py, auth.py, styles.py
+│   └── ui/             # app.py, views/, state.py, quarters.py,
+│                       # chart.py, export.py, cache.py, auth.py, styles.py
 ├── scripts/
-│   ├── run_ingestion.py        # PDF 匯入
-│   └── migrate_to_cloud.py     # 遷移至 Qdrant Cloud
+│   ├── run_ingestion.py        # PDF 匯入（→ BigQuery）
+│   └── setup_gcp_secrets.sh   # GCP Secret Manager 初始化
 ├── tests/
 │   ├── test_contradiction.py
 │   ├── test_llm_client.py
@@ -245,20 +245,20 @@ EarningsWatch/
 
 ```
 score ≥ 0.75 且 LLM judge 同意  →  report
-score < 0.75 且 iteration < 3   →  retry（gap sub_queries 依語意選 tavily / qdrant）
+score < 0.75 且 iteration < 3   →  retry（gap sub_queries 依語意選 tavily / bigquery）
 3 輪後 score < 0.40             →  abstain=True → 「資料不足」報告
 ```
 
-### 5.5 Qdrant Client（`src/core/qdrant_client.py`）
+### 5.5 BigQuery Client（`src/core/bq_client.py`）
 
 ```python
-COLLECTION_NAME = "earnings_calls"
-VECTOR_SIZE = 768  # paraphrase-multilingual-mpnet-base-v2
+TABLE_PATH = "{project}.earnings_data.earnings_calls"
+VECTOR_SIZE = 768  # gemini-embedding-2（MRL 截斷）
 ```
 
-Singleton via `lru_cache`。`QDRANT_URL` 有值 → Qdrant Cloud；否則 `localhost:6333`。
+Singleton via `lru_cache`。使用 Application Default Credentials（ADC）— GCP 環境無需額外設定金鑰。
 
-**規範**：所有模組必須透過 `get_qdrant_client()` 取得，禁止直接 `QdrantClient(...)`。
+**規範**：所有模組必須透過 `get_bq_client()` 取得，禁止直接 `bigquery.Client(...)`。
 
 ### 5.6 多公司比較（`src/core/comparison.py`）
 
@@ -476,100 +476,73 @@ gatherUsageStats = false     # 不回傳統計到 Streamlit 伺服器
 
 ```bash
 python src/core/llm_client.py     # 印出 active backend + 測試呼叫
-python src/core/qdrant_client.py  # health check + 確保 collection 存在
+python src/core/bq_client.py      # health check + 確保 dataset/table 存在
 python src/agent/graph.py         # 編譯並印出 graph 結構
 python -m py_compile src/ui/app.py # 語法檢查
 ```
 
 ---
 
-## 12. 雲端部署（Streamlit Cloud）
+## 12. 雲端部署（GCP Cloud Run）
 
 ### 前置條件
 
 | 項目 | 說明 |
 |---|---|
-| Qdrant Cloud | 在 [qdrant.tech](https://qdrant.tech) 建立免費 cluster（1GB 免費）|
+| GCP 帳號 | 啟用 BigQuery / Vertex AI / Cloud Run / Secret Manager API |
 | LLM API Key | 至少一個（Gemini 免費層推薦）|
 | GitHub repo | Fork 此 repo 到自己帳號 |
 
-### 步驟一：資料遷移
+向量資料庫已 Serverless 化（BigQuery），**不需要** Qdrant Cloud 或任何 Docker 容器。
 
-先將本地 Qdrant 資料遷移至 Qdrant Cloud：
+### 部署步驟
+
+詳見 `docs/DEPLOY_GCP.md`。重點：
 
 ```bash
-# 在 .env 填入雲端資訊
-QDRANT_URL=https://xxxx-xxxx.qdrant.io
-QDRANT_API_KEY=your-cloud-key
+# 1. 啟用必要 GCP API
+gcloud services enable run.googleapis.com bigquery.googleapis.com \
+    aiplatform.googleapis.com secretmanager.googleapis.com
 
-# 執行遷移（自動建立 collection + payload indexes）
-python scripts/migrate_to_cloud.py
+# 2. 把 secrets 寫入 Secret Manager（見 DEPLOY_GCP.md）
 
-# 遷移過程：
-#   1. 連接本地 localhost:6333
-#   2. 確認 collection "earnings_calls" 存在
-#   3. 在雲端建立同名 collection（cosine, 768 維）
-#   4. 分批 scroll（100 筆/批）上傳至 Qdrant Cloud
-#   5. 建立 payload indexes（company / quarter / section）
-#      ← Cloud 嚴格模式下沒 index 無法 filter，這步不可省略
+# 3. Cloud Build → Cloud Run
+gcloud builds submit --tag $IMAGE
+gcloud run deploy earningswatch --image=$IMAGE --region=$REGION \
+    --set-env-vars="GOOGLE_CLOUD_PROJECT=$PROJECT_ID" ...
 ```
 
-### 步驟二：Streamlit Cloud 設定
+### 環境差異
 
-1. 前往 [streamlit.io/cloud](https://streamlit.io/cloud) → New app
-2. 連結 GitHub repo，主檔案設為 `src/ui/app.py`
-3. 在 **Advanced settings → Secrets** 填入：
-
-```toml
-# .streamlit/secrets.toml（不進 git，在 Streamlit Cloud 介面填入）
-GEMINI_API_KEY = "your-key"          # 或其他 LLM key
-QDRANT_URL = "https://xxxx.qdrant.io"
-QDRANT_API_KEY = "your-cloud-key"
-APP_PASSWORD = "your-access-password" # 建議設定，防止未授權存取
-COHERE_API_KEY = "your-key"          # 可選，啟用 Rerank
-TAVILY_API_KEY = "your-key"          # 可選，啟用新聞搜尋
-```
-
-4. 點擊 Deploy → 約 3–5 分鐘取得公開 URL
-
-### 雲端 vs 本地差異
-
-| 項目 | 本地端 | Streamlit Cloud |
+| 項目 | 本地開發 | GCP Cloud Run |
 |---|---|---|
-| Qdrant | Docker `localhost:6333` | Qdrant Cloud（`QDRANT_URL`）|
-| 環境變數 | `.env` 檔案 | Streamlit Secrets（`secrets.toml`）|
-| Embedding | 本地執行（`sentence-transformers`）| 同上（Cloud 也在 container 內執行）|
-| 字體（PDF 匯出）| STHeiti（macOS）| Noto CJK（Linux 降級）|
+| 向量資料庫 | BigQuery（ADC 認證）| BigQuery（Service Account）|
+| Embedding | Vertex AI API（`GEMINI_API_KEY`）| 同上 |
+| 環境變數 | `.env` 檔案 | `--set-env-vars` + Secret Manager |
+| 字體（PDF 匯出）| STHeiti（macOS）| Noto CJK（Linux，`packages.txt` 安裝）|
 | 存取控制 | 可選（`APP_PASSWORD`）| **強烈建議設定** |
-| Qdrant 暴露 | 只綁 `127.0.0.1` | 由 Qdrant Cloud 管控 |
-
-### Qdrant Cloud 注意事項
-
-- Collection 名稱固定：`earnings_calls`
-- **payload indexes 必須存在**（`company`, `quarter`, `section`）；`migrate_to_cloud.py` 的最後一步已自動建立
-- 免費 cluster 有 idle 限制；若長時間無存取可能需要重新喚醒
 
 ---
 
 ## 13. 環境變數完整清單
 
-### `.env`（本地）/ Streamlit Secrets（雲端）
+### `.env`（本地）/ GCP Secret Manager（雲端）
 
 | 變數 | 必要性 | 說明 |
 |---|---|---|
-| `OPENAI_API_KEY` | **擇一** ★ | GPT-5o / GPT-5o-mini（主力，2026-05 更新）|
-| `GEMINI_API_KEY` | **擇一** | Gemini 3.0 Flash（免費額度大）|
+| `GOOGLE_CLOUD_PROJECT` | **必填** | GCP 專案 ID（BigQuery + Vertex AI）|
+| `GEMINI_API_KEY` | **擇一** ★ | Gemini 2.5 Flash（免費額度大，auto-detect 首選）|
+| `OPENAI_API_KEY` | **擇一** | GPT-5 / GPT-5-mini（付費）|
+| `ANTHROPIC_API_KEY` | **擇一** | Claude Sonnet 4.6 / Haiku 4.5（付費，2026-05 回歸）|
 | `COHERE_API_KEY` | **擇一** | Command R+（同時用於 Rerank）|
 | `TAVILY_API_KEY` | 選填 | 即時新聞搜尋 |
-| `QDRANT_URL` | 選填 | Qdrant Cloud URL；不填用本地 Docker |
-| `QDRANT_API_KEY` | 選填 | Qdrant Cloud Key |
-| `QDRANT_HOST` | 選填 | 本地 host（預設 `localhost`）|
-| `QDRANT_PORT` | 選填 | 本地 port（預設 `6333`）|
-| `LLM_BACKEND` | 選填 | 強制後端（`openai / gemini / cohere`）|
-| `LLM_TIMEOUT_SECONDS` | 選填 | LLM 呼叫 timeout（預設 45）|
-| `LLM_INJECTION_GUARD` | 選填 | 設 `false` 停用 injection guardrail（測試用）|
+| `LLM_BACKEND` | 選填 | 強制後端（`gemini / openai / anthropic / cohere`）|
+| `GCP_SECRET_PROJECT` | 選填 | 啟用 GCP Secret Manager（不設則讀 .env）|
 | `APP_PASSWORD` | 選填 | 存取密碼；雲端部署**強烈建議**設定 |
 | `LLAMA_CLOUD_API_KEY` | 選填 | LlamaParse（表格密集 PDF，免費 1000頁/天）|
+| `COVERAGE_MIN_SCORE` | 選填 | coverage sweep 相似度門檻（預設 0.25）|
+| `LLM_HYDE_ENABLED` | 選填 | HyDE 查詢擴展（預設 false）|
+| `LLM_BUDGET_USD` | 選填 | 每次查詢 LLM 預算上限（預設 0.50 USD）|
 
 ---
 
@@ -579,9 +552,8 @@ TAVILY_API_KEY = "your-key"          # 可選，啟用新聞搜尋
 |---|---|---|
 | Agent 框架 | LangGraph + LangChain-core | ≥ 0.2 |
 | UI | Streamlit | ≥ 1.39 |
-| 向量資料庫 | Qdrant | ≥ 1.9 |
-| Embedding | sentence-transformers（paraphrase-multilingual-mpnet-base-v2）| ≥ 3.0 |
-| 混合檢索 | rank_bm25 + jieba | ≥ 0.2.2 |
+| 向量資料庫 | BigQuery VECTOR_SEARCH（Serverless）| — |
+| Embedding | gemini-embedding-2（Vertex AI）| google-genai ≥ 1.0 |
 | Rerank | Cohere rerank-multilingual-v3.0 | ≥ 5.0 |
 | PDF 解析 | pdfplumber（主）/ LlamaParse（備援）| ≥ 0.11 |
 | 圖表 | Plotly | ≥ 5.0 |
@@ -598,11 +570,10 @@ TAVILY_API_KEY = "your-key"          # 可選，啟用新聞搜尋
 
 | 優先度 | 項目 | 動工觸發條件 |
 |---|---|---|
-| 🟡 Medium | `src/ui/session.py` — 集中 session-state magic strings | 下次修改 `app.py` rendering 前 |
-| 🟢 Low | 拆分 single/multi rendering 進獨立 view 檔案 | 要新增第三種 view 時 |
+| ✅ | UIState dataclass — session-state 集中管理 | 已完成（`src/ui/state.py`）|
+| ✅ | 拆分 single/multi rendering 進獨立 view 檔案 | 已完成（`src/ui/views/`）|
 | 🟢 Low | LangGraph `SqliteSaver` checkpoint | 有人抱怨「Agent 斷掉要重跑」 |
-| 🟢 Low | Per-user rate limiting（cookie hash）| 對外公開多人使用時 |
-| 🟢 Low | CI Streamlit smoke test（`curl /_stcore/health`）| 發生「CI 綠但生產壞」後 |
+| 🟢 Low | Per-user rate limiting（進階，Cloud Armor）| 對外公開多人使用時 |
 
 **明確不做**：AI 替代分析師寫報告、股價預測、使用者帳號系統、支援所有美股、fine-tune 自有模型。
 

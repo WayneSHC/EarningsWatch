@@ -90,12 +90,17 @@ jobs:
         run: |
           python -m compileall -q src scripts
 
+      - name: Install coverage tool
+        run: pip install pytest-cov
+
       - name: Run unit tests
         # Tests are designed to run without real API keys (network calls are stubbed
         # via monkeypatch). Conftest sets dummy env vars so module-level code paths
         # don't blow up.
+        # --cov-fail-under enforces a coverage floor: any PR that removes tests or
+        # skips branches will fail CI before it lands.
         run: |
-          pytest tests/ -v --tb=short
+          pytest tests/ -v --tb=short --cov=src --cov-fail-under=68
 
       - name: Streamlit smoke test
         # py_compile catches syntax errors but not runtime issues like a misplaced

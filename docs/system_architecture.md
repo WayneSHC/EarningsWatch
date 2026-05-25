@@ -21,10 +21,9 @@
 
 | 項目 | 版本 |
 |---|---|
-| **Python** | 3.14.4 |
-| **作業系統（開發）** | macOS |
-| **Docker** | 29.4.0 |
-| **Qdrant（Docker Image）** | qdrant/qdrant（latest） |
+| **Python** | 3.11+ |
+| **作業系統（開發）** | macOS / Linux |
+| **向量資料庫** | Google BigQuery（Serverless） |
 
 ---
 
@@ -48,17 +47,17 @@
 └──────┬─────────────────────┬──────────────────────────────────--┘
        │ 向量搜尋              │ LLM 呼叫
 ┌──────▼──────┐        ┌──────▼──────────────────────────────────┐
-│   Qdrant    │        │           LLM Backend Layer              │
-│  (Docker /  │        │  llm_client.py                          │
-│   Cloud)    │        │  Gemini · Anthropic · OpenAI · Groq ·   │
-│  Port 6333  │        │  Cohere（單一 chat() 入口，自動偵測後端）│
+│  BigQuery   │        │           LLM Backend Layer              │
+│ VECTOR_     │        │  llm_client.py                          │
+│ SEARCH      │        │  Gemini · OpenAI · Anthropic · Cohere   │
+│ (Serverless)│        │ （單一 chat() 入口，自動偵測後端）       │
 └──────┬──────┘        └─────────────────────────────────────────┘
        │ 索引建立
 ┌──────▼──────────────────────────────────────────────────────────┐
 │                      Ingestion Pipeline                         │
 │   smart_parser.py（pdfplumber / LlamaParse）                    │
 │   chunker.py（QA-pair / sliding-window / whole-page）           │
-│   embedder.py（sentence-transformers 本地 embedding）           │
+│   embedder.py（gemini-embedding-2，Vertex AI，768 維）          │
 └──────┬──────────────────────────────────────────────────────────┘
        │ 讀取
 ┌──────▼──────────────────────────────────────────────────────────┐
@@ -79,17 +78,17 @@ PDF（data/raw_pdfs/）
   │                        · QA-pair（問答對切分）
   │                        · sliding-window（256 tokens，重疊 64）
   │                        · whole-page（表格頁整頁保留）
-  ↓  embedder.py        → paraphrase-multilingual-mpnet-base-v2（768 維）
-  │                        本地 GPU/CPU 執行，批次大小 32
-  ↓  Qdrant             → Collection: "earnings_calls"
-                           Cosine Distance；
-                           Payload: company, quarter, section, content, page
+  ↓  embedder.py        → gemini-embedding-2（768 維，MRL 截斷）
+  │                        Vertex AI API，BATCH_SIZE=1（逐筆）
+  ↓  BigQuery           → Table: "earnings_data.earnings_calls"
+                           VECTOR_SEARCH，Cosine Distance；
+                           Columns: company, quarter, section, content, page, embedding
 
 查詢（Streamlit）
   ↓  classify node       → 萃取 company / topic / quarters
   ↓  decompose node      → 拆解 3 條子查詢（含季度 / 細節 / 對比面向）
   ↓  route node          → decide_tools()：判斷是否需要 tavily / yfinance
-  ↓  retrieve node       → 並行：Qdrant top-k + Coverage Sweep
+  ↓  retrieve node       → 並行：BigQuery VECTOR_SEARCH top-k + Coverage Sweep
   │                        + Cohere Rerank（rerank-multilingual-v3.0）
   ↓  detect node         → batch_detect()：LLM 逐季對比較 → JSON 結構
   │                        detect_promises()：前瞻承諾偵測
@@ -114,33 +113,34 @@ PDF（data/raw_pdfs/）
 
 | 後端 | SDK | 使用模型（Demo / Dev） | 備註 |
 |---|---|---|---|
-| **OpenAI** ★ | openai ≥ 1.50 | gpt-5 / gpt-5-mini | 主力，2026-05-08 校正模型名 |
-| **Gemini** | google-genai ≥ 1.0 | gemini-2.5-flash / gemini-2.5-flash | 免費額度大，主力備援 |
-| **Cohere** | cohere ≥ 5.0 | command-r-plus-08-2024 / command-r7b-12-2024 | 同時用於 Rerank |
+| **Gemini** ★ | google-genai ≥ 1.0 | gemini-2.5-flash | 免費額度大，auto-detect 首選 |
+| **OpenAI** | openai ≥ 1.50 | gpt-5 / gpt-5-mini | 付費，2026-05-08 校正模型名 |
+| **Anthropic** | anthropic ≥ 0.25 | claude-sonnet-4-6 / claude-haiku-4-5 | 2026-05 回歸（top-up 後）|
+| **Cohere** | cohere ≥ 5.0 | command-r-plus-08-2024 | 同時用於 Rerank |
 
-> ⛔ 已移除：anthropic、groq（無 API Key）。  
-> 切換方式：設定環境變數 `LLM_BACKEND=openai`（或 gemini / cohere）。  
-> 未設定時自動偵測順序：`openai → gemini → cohere`  
-> 🔄 任一後端 quota / 429 rate limit / 401-403 / 404 / 503 → 印出友善中文訊息（例：`⚠️ OpenAI (GPT-5) 今日 token / 配額已用完，自動切換下一個後端…`）並切換下一個。網路 / timeout 錯誤同後端重試 1 次後再切換。
+> ⛔ 已移除：groq（不在支援清單）。  
+> 切換方式：設定環境變數 `LLM_BACKEND=gemini`（或 openai / anthropic / cohere）。  
+> 未設定時自動偵測順序：`gemini → openai → anthropic → cohere`  
+> 🔄 任一後端 quota / 429 rate limit / 401-403 / 404 / 503 → 印出友善中文訊息並切換下一個。網路 / timeout 錯誤同後端重試 1 次後再切換。
 
 ### 5.3 向量資料庫
 
 | 技術 | 版本 | 用途 |
 |---|---|---|
-| **Qdrant** | Docker image（latest） | 向量儲存，Cosine Distance |
-| **qdrant-client** | 1.17.1 | Python SDK，支援 Facet API（v1.10+）|
+| **BigQuery** | Serverless | 向量儲存 + VECTOR_SEARCH，Cosine Distance |
+| **google-cloud-bigquery** | ≥ 3.0 | Python SDK |
 
-- Collection 名稱：`earnings_calls`
-- 向量維度：768（對應 paraphrase-multilingual-mpnet-base-v2）
-- Payload 欄位：`company`, `quarter`, `section`, `content`, `page`
+- Table 路徑：`{GOOGLE_CLOUD_PROJECT}.earnings_data.earnings_calls`
+- 向量維度：768（對應 gemini-embedding-2 MRL 截斷）
+- 欄位：`company`, `quarter`, `section`, `content`, `page`, `embedding`
 
 ### 5.4 Embedding 與 Rerank
 
 | 技術 | 版本 | 用途 |
 |---|---|---|
-| **sentence-transformers** | 5.4.1 | 本地 Embedding 推論 |
-| **torch** | 2.11.0 | sentence-transformers 底層 |
-| **Embedding 模型** | paraphrase-multilingual-mpnet-base-v2 | 768 維，支援中英文多語言 |
+| **google-genai** | ≥ 1.0 | Gemini Embedding API（gemini-embedding-2） |
+| **google-cloud-aiplatform** | ≥ 1.0 | Vertex AI 底層（ADC 認證）|
+| **Embedding 模型** | gemini-embedding-2 | 768 維（MRL 截斷），支援中英文多語言 |
 | **Cohere Rerank** | API（cohere 5.21.1） | rerank-multilingual-v3.0，二階段精排 |
 
 ### 5.5 PDF 解析
@@ -187,22 +187,34 @@ EarningsWatch/
 │   │   ├── state.py               # AgentState TypedDict 型別定義
 │   │   └── tools.py               # Tavily 新聞、yfinance 股價、工具路由
 │   ├── core/                      # 核心業務邏輯層
-│   │   ├── llm_client.py          # 統一 LLM 呼叫介面（5 後端）
-│   │   ├── qdrant_client.py       # Qdrant singleton client
+│   │   ├── llm_client.py          # 統一 LLM 呼叫介面（4 後端）
+│   │   ├── bq_client.py           # BigQuery singleton client（lru_cache）
 │   │   ├── retriever.py           # 向量搜尋 + Coverage Sweep + Rerank
 │   │   ├── contradiction.py       # LLM 矛盾偵測、承諾追蹤
-│   │   └── comparison.py          # 多公司並行分析、比較表、差異摘要
+│   │   ├── comparison.py          # 多公司並行分析、比較表、差異摘要
+│   │   ├── secrets.py             # GCP Secret Manager / .env 橋接
+│   │   ├── telemetry.py           # Token / cost / latency 統計
+│   │   └── rate_limiter.py        # IP-based rate limiting
 │   ├── ingestion/                 # 資料匯入流水線
 │   │   ├── smart_parser.py        # PDF 解析（pdfplumber / LlamaParse）
 │   │   ├── chunker.py             # 文本切分（3 種策略）
-│   │   └── embedder.py            # Embedding 生成與 Qdrant 上傳
+│   │   └── embedder.py            # Embedding（gemini-embedding-2）+ BigQuery 寫入
 │   └── ui/                        # Streamlit UI 層
-│       ├── app.py                 # 主介面（~1000 行）
+│       ├── app.py                 # 薄殼主介面（page config / sidebar / dispatch）
+│       ├── views/
+│       │   ├── single.py          # 單公司結果渲染
+│       │   └── multi.py           # 多公司比較結果渲染
+│       ├── state.py               # UIState dataclass（session state 集中管理）
+│       ├── quarters.py            # BigQuery SELECT DISTINCT 動態季度列表
 │       ├── chart.py               # Plotly 趨勢圖
-│       └── export.py              # CSV / PDF 匯出
+│       ├── export.py              # CSV / PDF 匯出
+│       ├── cache.py               # Demo 快取讀寫
+│       ├── auth.py                # APP_PASSWORD 驗證
+│       └── styles.py              # CUSTOM_CSS
 ├── scripts/
 │   ├── run_ingestion.py           # PDF 匯入執行腳本
-│   └── migrate_to_cloud.py        # 本地 Qdrant → Qdrant Cloud 遷移
+│   ├── setup_gcp_secrets.sh       # 一鍵建立 Secret Manager 條目
+│   └── rotate_secret.sh           # 輪換 / 初次寫入 secret
 ├── data/
 │   ├── raw_pdfs/                  # 原始 PDF（不提交至 git）
 │   └── processed/
@@ -211,7 +223,6 @@ EarningsWatch/
 │   └── demo_cache.json            # Demo 快取（Agent 失敗時保底）
 ├── docs/
 │   └── system_architecture.md    # 本文件
-├── qdrant_storage/                # Qdrant Docker 本地持久化（不提交 git）
 ├── requirements.txt
 ├── CLAUDE.md
 ├── .env                           # API Keys（不提交 git）
@@ -226,7 +237,7 @@ EarningsWatch/
 |---|---|---|---|
 | 1 | `classify` | `intent_classifier` | query → company / topic / quarters |
 | 2 | `decompose` | `query_decomposer` | query + topic → sub_queries（3 條）|
-| 3 | `route` | `dynamic_tool_router` | query + topic → tool_plan（qdrant / tavily / yfinance）|
+| 3 | `route` | `dynamic_tool_router` | query + topic → tool_plan（bigquery / tavily / yfinance）|
 | 4 | `retrieve` | `parallel_retrieval` | sub_queries → retrieved（{quarter: [chunks]}）+ news + stock |
 | 5 | `detect` | `contradiction_detect` | retrieved + topic → contradictions + promises |
 | 6 | `reflect` | `self_reflect` | contradictions → confidence；< 0.75 → retry ↩④，≥ 0.75 → continue |
@@ -243,7 +254,7 @@ EarningsWatch/
 ```
 子查詢 × 3
   ↓
-Qdrant 向量搜尋（top-k=20，Cosine Distance）
+BigQuery VECTOR_SEARCH（top-k=20，Cosine Distance）
   ↓
 Coverage Sweep（補充初次未覆蓋的季度，min_score ≥ 0.25）
   ↓
@@ -252,7 +263,7 @@ Cohere Rerank（rerank-multilingual-v3.0，最終保留 top-5）
 
 ### 8.2 Coverage Sweep
 
-- 使用 `get_company_quarters()` 取得 Qdrant 中該公司所有季度（優先用 Facet API，降級用 scroll）
+- 使用 `get_company_quarters()` 執行 `SELECT DISTINCT quarter FROM BigQuery` 取得該公司所有季度
 - 對初次檢索未覆蓋的季度補充一輪搜尋
 - `min_score=0.25` 門檻：相似度不足的季度直接跳過，避免引入雜訊
 
@@ -273,26 +284,19 @@ Cohere Rerank（rerank-multilingual-v3.0，最終保留 top-5）
 
 ## 10. 部署模式
 
-### 本地開發（Docker Qdrant）
+### 本地開發
 
 ```bash
-# 啟動 Qdrant
-docker run -d --name qdrant -p 6333:6333 \
-  -v $(pwd)/qdrant_storage:/qdrant/storage qdrant/qdrant
+# 確保已設定 GCP ADC（Application Default Credentials）
+gcloud auth application-default login
 
 # 啟動 Streamlit
-source venv/bin/activate
 streamlit run src/ui/app.py --server.port 8501
 ```
 
-### Streamlit Cloud 部署（雲端 Qdrant）
+### GCP Cloud Run 部署
 
-```
-環境變數設定：
-  QDRANT_URL=https://xxxxx.qdrant.io
-  QDRANT_API_KEY=...
-  GEMINI_API_KEY=...（或其他 LLM key）
-```
+參見 `docs/DEPLOY_GCP.md`。向量存取走 BigQuery（Serverless），無需本機容器。
 
 ---
 
@@ -300,13 +304,15 @@ streamlit run src/ui/app.py --server.port 8501
 
 | 變數 | 必要性 | 說明 |
 |---|---|---|
-| `OPENAI_API_KEY` | 至少一個 LLM key ★ | GPT-5o / GPT-5o-mini（主力）|
-| `GEMINI_API_KEY` | 至少一個 LLM key | Gemini 3.0 Flash（免費額度大）|
+| `GOOGLE_CLOUD_PROJECT` | 必要 | GCP 專案 ID（BigQuery + Vertex AI）|
+| `GEMINI_API_KEY` | 至少一個 LLM key ★ | Gemini 2.5 Flash（免費額度大，auto-detect 首選）|
+| `OPENAI_API_KEY` | 至少一個 LLM key | GPT-5 / GPT-5-mini |
+| `ANTHROPIC_API_KEY` | 至少一個 LLM key | Claude Sonnet 4.6 / Haiku 4.5（付費）|
 | `COHERE_API_KEY` | 至少一個 LLM key | Command R+（同時用於 Rerank）|
-| `LLM_BACKEND` | 選用 | 強制指定後端（openai / gemini / cohere）|
-| `QDRANT_URL` | 選用 | Qdrant Cloud URL（不設則用本地 Docker）|
-| `QDRANT_API_KEY` | 選用 | Qdrant Cloud API Key |
-| `QDRANT_HOST` | 選用 | 本地 Qdrant host（預設 localhost）|
-| `QDRANT_PORT` | 選用 | 本地 Qdrant port（預設 6333）|
+| `LLM_BACKEND` | 選用 | 強制指定後端（gemini / openai / anthropic / cohere）|
+| `GCP_SECRET_PROJECT` | 選用 | GCP 專案 ID，啟用 Secret Manager（不設則用 .env）|
 | `LLAMA_CLOUD_API_KEY` | 選用 | LlamaParse 表格補救（免費 1000頁/天）|
 | `TAVILY_API_KEY` | 選用 | 即時新聞搜尋 |
+| `COVERAGE_MIN_SCORE` | 選用 | coverage sweep 相似度門檻（預設 0.25）|
+| `LLM_HYDE_ENABLED` | 選用 | 啟用 HyDE 查詢擴展（預設 false）|
+| `LLM_BUDGET_USD` | 選用 | 每次查詢 LLM 預算上限（預設 0.50 USD）|
