@@ -17,6 +17,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from tenacity import retry, stop_after_attempt, wait_exponential, RetryError
 
 from src.core.llm_client import chat as llm_chat
+from src.core.safe import safe_int_env
 
 # [f] Evidence Verifier 參數
 _MIN_QUOTE_LEN = 10       # 少於此長度不做驗證（太短的字串易誤判）
@@ -54,22 +55,6 @@ _BOILERPLATE_SIGNATURES = (
 )
 # [c] 預先計算「移除所有空白後」的簽名，避免每次比對時重複處理
 _BOILERPLATE_NORMALIZED = tuple("".join(s.split()) for s in _BOILERPLATE_SIGNATURES)
-
-
-def _safe_int_env(name: str, default: int) -> int:
-    """[b] 從環境變數讀整數，非法值（空字串 / 非數字）退回 default 並警告。
-
-    `int(os.getenv(...))` 直接呼叫在 env 設成非整數時會 raise ValueError，
-    讓單一外部設定錯誤癱瘓整個 batch。本 helper 統一安全 fallback。
-    """
-    raw = os.getenv(name)
-    if raw is None or raw == "":
-        return default
-    try:
-        return int(raw)
-    except ValueError:
-        print(f"[Contradiction] ⚠ {name}={raw!r} 非整數，回退預設 {default}")
-        return default
 
 
 def _sanitize_topic(topic: str) -> str:
@@ -459,7 +444,7 @@ def batch_detect(
     # [c] 並行 LLM 呼叫：LLM API 為 I/O-bound，ThreadPoolExecutor 可有效縮短總等待時間。
     # [b] max_workers=2：Gemini 免費層 RPM 緊（2.5-flash 約 10 RPM），加上 decomposer/judge
     #     /tool router 等其他 LLM 呼叫，並行度太高會立刻觸發 429。可由環境變數覆寫。
-    _workers = min(len(pairs), _safe_int_env("LLM_PAIR_WORKERS", 2))
+    _workers = min(len(pairs), safe_int_env("LLM_PAIR_WORKERS", 2, prefix="Contradiction"))
     raw_results: dict[int, dict] = {}
     with ThreadPoolExecutor(max_workers=_workers) as pool:
         futures = {pool.submit(_detect_pair, p): idx for idx, p in enumerate(pairs)}
@@ -542,7 +527,7 @@ def detect_promises(chunks_by_quarter: dict[str, list[dict]], topic: str) -> lis
             return None
 
     # [c] 並行 LLM 呼叫（與 batch_detect 一致），保守 max_workers 避免 Gemini 免費層 RPM
-    _workers = min(len(tasks), _safe_int_env("LLM_PAIR_WORKERS", 2))
+    _workers = min(len(tasks), safe_int_env("LLM_PAIR_WORKERS", 2, prefix="Contradiction"))
     indexed: dict[int, dict] = {}
     with ThreadPoolExecutor(max_workers=_workers) as pool:
         futures = {pool.submit(_run_promise, t): idx for idx, t in enumerate(tasks)}

@@ -10,6 +10,8 @@ from functools import lru_cache
 from typing import Any
 import yfinance as yf
 
+from src.core.safe import log_exc
+
 # ── 工具路由關鍵字（提升為 module-level 常數，方便維護）────────────────────────
 # [d] 與 decide_tools 函式分離，修改關鍵字不需要進入函式內部
 _NEWS_KEYWORDS  = [
@@ -141,7 +143,7 @@ def search_news(query: str, company: str, max_results: int = 5) -> list[dict]:
         results.sort(key=lambda x: _parse_pub_date(x["published_date"]), reverse=True)
         return results[:max_results]
     except Exception as e:
-        print(f"[Tools] Tavily 搜尋失敗: {e}")
+        log_exc("Tools", "Tavily 搜尋", e)
         return []
 
 
@@ -188,7 +190,7 @@ def get_stock_price(company: str, period: str = "1y") -> dict:
             "currency": currency,
         }
     except Exception as e:
-        print(f"[Tools] yfinance 失敗: {e}")
+        log_exc("Tools", "yfinance", e)
         return {"error": str(e)}
 
 

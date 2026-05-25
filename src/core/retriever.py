@@ -15,6 +15,7 @@ from google.cloud import bigquery
 from src.core.bq_client import get_bq_client, get_table_path
 from src.core.secrets import get_secret
 from src.ingestion.embedder import embed_query_texts, EMBEDDING_MODEL
+from src.core.safe import log_exc
 
 TOP_K_RETRIEVAL = 20
 TOP_K_RERANK = 5
@@ -54,14 +55,8 @@ def _load_min_score_from_env() -> float:
     return val
 
 def _log_bq_error(where: str, exc: BaseException) -> None:
-    """[b][f] 統一 BigQuery 錯誤記錄：截斷訊息至 120 字，僅記錄類型 + 短訊息。
-
-    BigQuery 例外訊息可能含 project ID / table path / credentials 路徑等敏感資訊；
-    將其原樣印到 UI 或 log 違反 Constitution Principle VI（不洩漏端點 / 憑證）。
-    此 helper 統一截斷以符合 contradiction.py 中 _unwrap + str(...)[:120] 的成例。
-    """
-    msg = str(exc)[:120]
-    print(f"[Retriever] ⚠ {where} BigQuery 失敗（{type(exc).__name__}: {msg}）")
+    """[b][f] BigQuery 錯誤記錄 — 委派給共享的 log_exc 以保證跨模組訊息一致。"""
+    log_exc("Retriever", f"{where} BigQuery", exc)
 
 
 @lru_cache(maxsize=128)
