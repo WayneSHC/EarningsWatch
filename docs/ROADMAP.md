@@ -207,7 +207,9 @@ CI workflow 加一步：
 
 ---
 
-## #6 — test: 補上 src/ui/chart.py 的 unit tests
+## ✅ #6 — test: 補上 src/ui/chart.py 的 unit tests
+
+> **已完成**（`tests/test_chart.py` 存在，涵蓋 `TestStanceScore` / `TestBuildStanceSeries` / `TestRenderTrendChart` / `TestChartToScrollableHtml`，437 tests 全綠）。
 
 **優先度**：🟡 Medium
 **預估**：1-2 小時
@@ -237,7 +239,9 @@ CI workflow 加一步：
 
 ---
 
-## #7 — test: 補上 src/core/comparison.py 的 unit tests
+## ✅ #7 — test: 補上 src/core/comparison.py 的 unit tests
+
+> **已完成**（`tests/test_comparison.py` 存在，涵蓋 `run_multi_company` / `build_comparison_table` / `synthesize_diff`，437 tests 全綠）。
 
 **優先度**：🟡 Medium
 **預估**：1-2 小時
@@ -380,6 +384,8 @@ STHeiti（macOS）→ NotoSansCJK（Debian/Ubuntu）→ WQYZenHei → AR PL UMin
 | 2026-05-09 | #3 / #4 加上 GCP 部署情境註記（PostgresSaver / Cloud Armor） |
 | 2026-05-09 | 新增 #6–#10：chart/comparison test、.env.example、ingestion 原子寫入、PDF 字型 doc |
 | 2026-05-09 | #8 / #9 / #10 完成（quick wins：env doc、原子寫入、PDF 字型 doc） |
+| 2026-05-25 | #6 / #7 補登已完成（test_chart.py / test_comparison.py 已存在，437 tests 全綠） |
+| 2026-05-25 | docs: 清除 CLAUDE.md / AGENTS.md / docs/* 中的 Qdrant / sentence-transformers 殘留文字 |
 
 > 新增項目請：①給優先度 ②寫動工觸發條件 ③估時。
 > 沒有觸發條件的項目視為「想要但不必要」，不應佔用排程。
