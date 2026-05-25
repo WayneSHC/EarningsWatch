@@ -1,7 +1,7 @@
 # GCP Cloud Run 部署指南
 
 把 EarningsWatch（Streamlit + LangGraph Agent）部署到 GCP Cloud Run，
-Vector DB 走 Qdrant Cloud Free tier，密鑰用 Secret Manager 管理。
+Vector DB 走 BigQuery Vector Search（Serverless），密鑰用 Secret Manager 管理。
 
 ## 架構概覽
 
@@ -10,8 +10,9 @@ Vector DB 走 Qdrant Cloud Free tier，密鑰用 Secret Manager 管理。
     ↓ HTTPS (auto by Cloud Run)
 Cloud Run (Streamlit container)
     ├─ Secret Manager   ← OPENAI_API_KEY / GEMINI_API_KEY / ...
-    ├─ Qdrant Cloud     ← 向量檢索（Free tier 1GB）
-    ├─ OpenAI / Gemini / Cohere  ← LLM
+    ├─ BigQuery         ← 向量檢索（VECTOR_SEARCH，Serverless）
+    ├─ Vertex AI        ← Embedding（gemini-embedding-2）
+    ├─ OpenAI / Gemini / Anthropic / Cohere  ← LLM
     ├─ Tavily           ← 即時新聞
     └─ Yahoo Finance    ← 股價
 ```
@@ -21,11 +22,12 @@ Cloud Run (Streamlit container)
 | 元件 | 方案 | 月費 |
 |---|---|---|
 | Cloud Run | 2 vCPU / 2GiB / min=0 / max=2 | $0 ~ $3（在免費額度內機率高） |
-| Qdrant Cloud | Free 1GB cluster | $0 |
+| BigQuery | 前 10 GB 儲存 + 1 TB 查詢/月免費 | $0（demo 規模內） |
+| Vertex AI Embedding | gemini-embedding-2 per-token 計費 | < $1（demo 規模內）|
 | Artifact Registry | < 0.5GB image storage | $0 |
 | Secret Manager | < 6 secrets, < 10k 讀取/月 | $0 |
 | Cloud Logging | 預設 retention | $0（前 50 GiB/月免費） |
-| **預估月費** | | **$0 ~ $3** |
+| **預估月費** | | **$0 ~ $4** |
 
 GCP 開新帳號送 $300 / 90 天試用，這個案例完全用不到，留著做意外保險。
 
@@ -64,7 +66,9 @@ gcloud services enable \
     run.googleapis.com \
     artifactregistry.googleapis.com \
     secretmanager.googleapis.com \
-    cloudbuild.googleapis.com
+    cloudbuild.googleapis.com \
+    bigquery.googleapis.com \
+    aiplatform.googleapis.com
 ```
 
 ### 3. 建立 Artifact Registry（存 Docker image）
@@ -76,24 +80,24 @@ gcloud artifacts repositories create earningswatch \
     --description="EarningsWatch container images"
 ```
 
-### 4. 申請 Qdrant Cloud Free cluster
-
-1. 到 https://cloud.qdrant.io 註冊
-2. 新建 1GB Free cluster（選最近的 region）
-3. 取得 `QDRANT_URL`（例：`https://xxxx.aws.cloud.qdrant.io`）和 `QDRANT_API_KEY`
-
-### 5. 把本地 Qdrant 資料遷到雲端
+### 4. 授權 Service Account 存取 BigQuery + Vertex AI
 
 ```bash
-# 在本機 .env 暫時填入 QDRANT_URL / QDRANT_API_KEY
-# 然後跑遷移腳本（從本地 Docker Qdrant 同步全部向量到 Cloud）
-source venv/bin/activate
-python scripts/migrate_to_cloud.py
+PROJECT_NUMBER=$(gcloud projects describe $PROJECT_ID --format='value(projectNumber)')
+SA="${PROJECT_NUMBER}-compute@developer.gserviceaccount.com"
+
+gcloud projects add-iam-policy-binding $PROJECT_ID \
+    --member="serviceAccount:$SA" \
+    --role="roles/bigquery.dataEditor"
+
+gcloud projects add-iam-policy-binding $PROJECT_ID \
+    --member="serviceAccount:$SA" \
+    --role="roles/aiplatform.user"
 ```
 
-確認雲端 collection `earnings_calls` 的 points_count 跟本地一致。
+BigQuery dataset `earnings_data` 與 table `earnings_calls` 會在首次呼叫 `ensure_dataset_and_table()` 時自動建立；Vertex AI 用於 gemini-embedding-2 API。
 
-### 6. 把所有 secrets 寫進 Secret Manager
+### 5. 把所有 secrets 寫進 Secret Manager
 
 每個 secret 一行一個指令（避免 key 進 shell history 用 `--data-file=-` + stdin）：
 
@@ -105,9 +109,6 @@ printf '%s' '你的key' | gcloud secrets create GEMINI_API_KEY --data-file=-
 printf '%s' '你的key' | gcloud secrets create COHERE_API_KEY --data-file=-
 printf '%s' 'tvly-...' | gcloud secrets create TAVILY_API_KEY --data-file=-
 printf '%s' 'llx-...' | gcloud secrets create LLAMA_CLOUD_API_KEY --data-file=-
-
-printf '%s' 'https://xxxx.aws.cloud.qdrant.io' | gcloud secrets create QDRANT_URL --data-file=-
-printf '%s' 'qdrant-api-key' | gcloud secrets create QDRANT_API_KEY --data-file=-
 
 # ⚠ 強烈建議設一組 APP_PASSWORD（公開 demo 必備）
 printf '%s' '請改成你的長亂碼密碼' | gcloud secrets create APP_PASSWORD --data-file=-
@@ -126,9 +127,8 @@ printf '%s' '新的key' | gcloud secrets versions add OPENAI_API_KEY --data-file
 PROJECT_NUMBER=$(gcloud projects describe $PROJECT_ID --format='value(projectNumber)')
 SA="${PROJECT_NUMBER}-compute@developer.gserviceaccount.com"
 
-for secret in OPENAI_API_KEY GEMINI_API_KEY COHERE_API_KEY \
-              TAVILY_API_KEY LLAMA_CLOUD_API_KEY \
-              QDRANT_URL QDRANT_API_KEY APP_PASSWORD; do
+for secret in OPENAI_API_KEY GEMINI_API_KEY ANTHROPIC_API_KEY COHERE_API_KEY \
+              TAVILY_API_KEY LLAMA_CLOUD_API_KEY APP_PASSWORD; do
     gcloud secrets add-iam-policy-binding $secret \
         --member="serviceAccount:$SA" \
         --role="roles/secretmanager.secretAccessor" \
@@ -177,14 +177,13 @@ gcloud run deploy earningswatch \
     --concurrency=20 \
     --timeout=600 \
     --session-affinity \
-    --set-env-vars="LLM_BACKEND=openai,LLM_HYDE_ENABLED=false" \
+    --set-env-vars="GOOGLE_CLOUD_PROJECT=$PROJECT_ID,LLM_BACKEND=gemini,LLM_HYDE_ENABLED=false" \
     --set-secrets="OPENAI_API_KEY=OPENAI_API_KEY:latest,\
 GEMINI_API_KEY=GEMINI_API_KEY:latest,\
+ANTHROPIC_API_KEY=ANTHROPIC_API_KEY:latest,\
 COHERE_API_KEY=COHERE_API_KEY:latest,\
 TAVILY_API_KEY=TAVILY_API_KEY:latest,\
 LLAMA_CLOUD_API_KEY=LLAMA_CLOUD_API_KEY:latest,\
-QDRANT_URL=QDRANT_URL:latest,\
-QDRANT_API_KEY=QDRANT_API_KEY:latest,\
 APP_PASSWORD=APP_PASSWORD:latest"
 ```
 
@@ -199,7 +198,7 @@ Service URL: https://earningswatch-xxxxxx-de.a.run.app
 
 | 旗標 | 值 | 理由 |
 |---|---|---|
-| `--memory=2Gi` | 2GB | torch + sentence-transformers + LangGraph + Streamlit，1GB 不夠 |
+| `--memory=2Gi` | 2GB | LangGraph + Streamlit + 依賴套件，1GB 不夠 |
 | `--cpu=2` | 2 vCPU | embedding 計算 + 並行 retrieval，1 vCPU 會卡 |
 | `--min-instances=0` | 0 | 沒人用就 scale to zero，省錢；代價是 cold start ≈ 8–15s |
 | `--max-instances=2` | 2 | 限制爆量上限，30–50 人 demo 夠用，避免被惡意請求拖爆 budget |
@@ -280,10 +279,11 @@ Image 與 secrets 還在，未來重部署只要重跑 deploy 指令。
 | 症狀 | 可能原因 | 處理 |
 |---|---|---|
 | `Container failed to start. Failed to start and then listen on the port defined by the PORT environment variable.` | Streamlit 沒綁 0.0.0.0 / 沒讀 $PORT | 確認 Dockerfile CMD 有 `--server.port=${PORT}` 與 `--server.address=0.0.0.0` |
-| Cold start 後第一次查詢就 OOM | 2GB 不夠（embedding 模型載入瞬間吃尖峰 1.6GB） | 升 `--memory=4Gi`（會脫離免費額度） |
+| Cold start 後第一次查詢就 OOM | 2GB 不夠 | 升 `--memory=4Gi`（會脫離免費額度） |
 | 部署成功但畫面空白 / WebSocket 一直斷 | 沒開 session affinity | `--session-affinity` 旗標補上 |
 | PDF 匯出顯示空白方塊 | image 沒裝 fonts-noto-cjk | Dockerfile 已包含；確認沒誤改 |
-| Qdrant 查詢報 401 | secret 拼錯 / 沒授權 service account | 重跑前置作業 step 6, 7 |
+| BigQuery 查詢報 403 | Service Account 缺 `bigquery.dataEditor` 權限 | 重跑前置作業 step 4 |
+| Vertex AI Embedding 報 403 | Service Account 缺 `aiplatform.user` 權限 | 重跑前置作業 step 4 |
 | 想用自訂網域 | Cloud Run 支援 custom domain | `gcloud run domain-mappings create`，需先在 Search Console 驗證網域所有權 |
 
 ---
