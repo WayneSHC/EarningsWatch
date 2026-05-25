@@ -5,34 +5,23 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Commands
 
 ```bash
-# Start everything (Qdrant + Streamlit in foreground)
-./start.sh
-
-# Start Streamlit directly (assumes Qdrant is already running)
+# Start Streamlit (BigQuery is serverless — no local DB to bring up)
 source venv/bin/activate
 streamlit run src/ui/app.py --server.port 8501 --server.headless true
 
-# Ingest PDFs into Qdrant
+# Ingest PDFs into BigQuery
 python scripts/run_ingestion.py               # all unprocessed PDFs
 python scripts/run_ingestion.py --dry-run     # preview only
 python scripts/run_ingestion.py --force       # re-ingest all
 python scripts/run_ingestion.py --pdf FILE    # single file
 
-# Migrate local Qdrant → Qdrant Cloud
-python scripts/migrate_to_cloud.py
-
 # Verify individual modules
 python src/core/llm_client.py        # prints active backend + test call
-python src/core/qdrant_client.py     # health check + ensure collection
+python src/core/bq_client.py         # health check + ensure dataset/table exist
 python src/agent/graph.py            # compiles and prints graph structure
 
 # Syntax check a file
 source venv/bin/activate && python -m py_compile src/ui/app.py
-
-# Start Qdrant alone (via docker-compose; idempotent)
-docker compose up -d qdrant
-docker compose down              # stop and remove (data persists in qdrant_storage/)
-docker compose logs -f qdrant    # tail Qdrant logs
 ```
 
 Tests live in `tests/`:
@@ -41,7 +30,7 @@ Tests live in `tests/`:
 # Run unit tests (offline; no API keys needed)
 pytest tests/ -v
 
-# Run end-to-end benchmark (30 questions, requires LLM API + Qdrant)
+# Run end-to-end benchmark (30 questions, requires LLM API + BigQuery)
 python tests/benchmark.py
 
 # Benchmark with RAGAS metrics (faithfulness / relevancy / precision)
@@ -64,13 +53,15 @@ python tests/benchmark.py --ragas                   # full RAGAS run (~$1 USD)
 PDF files (data/raw_pdfs/)
   → smart_parser.py    # pdfplumber for text; LlamaParse fallback for tables
   → chunker.py         # QA-pair splitting / sliding-window / whole-page for tables
-  → embedder.py        # paraphrase-multilingual-mpnet-base-v2 (768-dim), local
-  → Qdrant             # collection "earnings_calls", cosine distance
-                       # payload keys: company, quarter, section, content, page
+  → embedder.py        # gemini-embedding-2 (768-dim), via embed_query_texts
+  → BigQuery           # dataset earnings_data, table earnings_calls
+                       # VECTOR_SEARCH with distance_type => 'COSINE'
+                       # columns: id, company, quarter, section, content,
+                       #          source_file, source_page, chunk_index, embedding
 
 Query (Streamlit UI)
   → LangGraph Agent (7 nodes)
-  → Qdrant vector search + Cohere Rerank
+  → BigQuery VECTOR_SEARCH + Cohere Rerank (rerank-v3.5)
   → LLM contradiction detection
   → Streamlit display + CSV/PDF export
 ```
@@ -93,13 +84,13 @@ The conditional edge `reflect → retrieve` (retry) or `reflect → report` (end
 
 ### Coverage Sweep (`src/core/retriever.py`)
 
-After the initial top-k retrieval, `parallel_retrieval` calls `get_company_quarters()` (Qdrant facet API) then `retrieve_coverage()` for any quarters missing from the result set. Coverage sweep uses a shared embedding vector and applies a `min_score` gate (default `0.25`, configurable via `COVERAGE_MIN_SCORE` env var; non-float / out-of-range values fall back to default with a warning) to skip quarters with no relevant content.
+After the initial top-k retrieval, `parallel_retrieval` calls `get_company_quarters()` (BigQuery `SELECT DISTINCT quarter`) then `retrieve_coverage()` for any quarters missing from the result set. Coverage sweep issues a **single** `VECTOR_SEARCH` SQL with `ROW_NUMBER() OVER(PARTITION BY base.quarter ORDER BY distance)` to fetch top-K per missing quarter in one round trip, then applies a `min_score` gate (default `0.25`, configurable via `COVERAGE_MIN_SCORE` env var; non-float / out-of-range values fall back to default with a warning via `_load_min_score_from_env`) to skip quarters with no relevant content. BigQuery failures degrade gracefully — `retrieve_coverage` returns `{}` on exception so the agent's self-reflection loop can react.
 
 ### Self-Reflection Feedback Loop (`src/agent/nodes.py:self_reflect`)
 
 `self_reflect` builds two complementary retry plans:
 
-1. **Gap-driven** (LLM `gaps` field) — generates topic-specific retry queries; routes to Tavily when the gap mentions news / market / external context, otherwise Qdrant.
+1. **Gap-driven** (LLM `gaps` field) — generates topic-specific retry queries; routes to Tavily when the gap mentions news / market / external context, otherwise BigQuery.
 2. **Coverage-driven** (`coverage_matrix`) — flags quarters where `chunk_count<2` OR `max_score<0.4` OR `quote_verified=False` as "weak quarters" and emits up to 3 quarter-targeted retry queries with a `target_quarter` field. `parallel_retrieval` honors `target_quarter` by overriding `quarters_filter` for that single retrieval, concentrating retrieval power on the weak quarter.
 
 When the LLM judge gives a low score, both plans run together (gap fill + coverage fill), giving the next iteration material to fix both topic gaps and per-quarter retrieval blind spots. When neither plan produces queries, the original sub_queries are reused unchanged.
@@ -159,9 +150,9 @@ Optional dependency. When `ragas` and `langchain-openai` are installed and `OPEN
 
 The wrapper degrades gracefully: missing package, missing API key, or empty contexts all return `{}` instead of raising. RAGAS uses its own LLM (GPT-4o by default via `langchain-openai`) — independent of the project's `llm_client` cascade.
 
-### Qdrant Client (`src/core/qdrant_client.py`)
+### BigQuery Client (`src/core/bq_client.py`)
 
-Singleton via `lru_cache`. Uses `QDRANT_URL` + `QDRANT_API_KEY` for cloud; falls back to `localhost:6333` for local Docker. All modules must import via `get_qdrant_client()` — never instantiate `QdrantClient` directly.
+Singleton via `lru_cache`. Uses `GOOGLE_CLOUD_PROJECT` env var (defaults to `earningswatch-demo`); dataset `earnings_data` and table `earnings_calls` are project-config constants. All modules must import via `get_bq_client()` — never instantiate `bigquery.Client` directly. Credentials follow the standard Google Cloud auth chain (ADC / `GOOGLE_APPLICATION_CREDENTIALS`).
 
 ### Streamlit UI (`src/ui/app.py`)
 
@@ -192,20 +183,27 @@ Multi-company mode: `run_multi_company()` in `src/core/comparison.py` uses `Thre
 
 ## Environment Variables
 
-Required in `.env`:
+Required in `.env` (or Google Secret Manager — see `src/core/secrets.py`):
 
 ```
-# At least one LLM key (active backends: openai / gemini / cohere)
-OPENAI_API_KEY=...       # GPT-5o / GPT-5o-mini ★ primary
-GEMINI_API_KEY=...       # Gemini 3.0 Flash (large free tier)
-COHERE_API_KEY=...       # Command R+ (also used for Rerank)
+# Google Cloud / BigQuery
+GOOGLE_CLOUD_PROJECT=...     # GCP project that owns dataset earnings_data
+GOOGLE_APPLICATION_CREDENTIALS=...   # path to service account JSON (or use ADC)
+GCP_SECRET_PROJECT=...       # optional: project for Secret Manager lookups
+
+# At least one LLM key (active backends cascade: gemini → openai → anthropic → cohere)
+OPENAI_API_KEY=...           # GPT-5 / GPT-5-mini
+GEMINI_API_KEY=...           # Gemini 2.5 Flash (large free tier)
+ANTHROPIC_API_KEY=...        # Claude Sonnet 4.6 / Haiku 4.5
+COHERE_API_KEY=...           # Command R+; also required for Cohere rerank-v3.5
 
 # Optional
-LLM_BACKEND=openai       # force a specific backend (openai / gemini / cohere)
-QDRANT_URL=...           # Qdrant Cloud URL (omit for local Docker)
-QDRANT_API_KEY=...       # Qdrant Cloud key
-LLAMA_CLOUD_API_KEY=...  # enables LlamaParse for table-heavy PDFs
-COVERAGE_MIN_SCORE=0.25  # coverage sweep cosine-similarity gate; non-float / out-of-range → fallback to 0.25 with warning
+LLM_BACKEND=gemini           # force a specific backend
+LLM_HYDE_ENABLED=false       # enable HyDE query expansion (1 extra LLM call/unique query)
+LLM_PAIR_WORKERS=2           # contradiction.batch_detect concurrency (safe int env)
+LLM_BUDGET_USD=0.50          # per-query LLM budget for cost guard
+LLAMA_CLOUD_API_KEY=...      # enables LlamaParse for table-heavy PDFs
+COVERAGE_MIN_SCORE=0.25      # coverage sweep cosine-similarity gate; invalid → fallback 0.25
 ```
 
 ## PDF Ingestion Filename Conventions
@@ -220,16 +218,17 @@ Place PDFs in `data/raw_pdfs/`. Processed state is tracked in `data/processed/in
 
 ### a. 程式架構合理性
 
-層次分明的三層架構，各層職責單一、不互相滲透：
+層次分明的分層架構，各層職責單一、不互相滲透：
 
 | 層 | 目錄 | 職責 |
 |---|---|---|
 | UI 層 | `src/ui/` | Streamlit 頁面、圖表、匯出；不含任何業務邏輯 |
-| Agent 層 | `src/agent/` | LangGraph 7 節點；orchestration only，不直接呼叫 Qdrant |
-| Core 層 | `src/core/` | LLM client、Qdrant client、retriever、矛盾偵測；可獨立測試 |
+| Agent 層 | `src/agent/` | LangGraph 7 節點；orchestration only，不直接呼叫向量資料庫 |
+| Core 層 | `src/core/` | LLM client、BigQuery client、retriever、矛盾偵測；可獨立測試 |
+| Ingestion 層 | `src/ingestion/` | PDF parse / chunk / embed；Core 可依賴，反向禁止 |
 
 關鍵設計決策：
-- `get_qdrant_client()` 單例（`lru_cache`）→ 全域只有一個連線，避免資源浪費
+- `get_bq_client()` 單例（`lru_cache`）→ 全域只有一個 BigQuery client，避免資源浪費
 - `AgentState` TypedDict → 節點間傳遞有型別約束，IDE 可做靜態檢查
 - `@st.fragment` → UI re-render 隔離，radio 按鈕不觸發全頁重繪
 
@@ -243,8 +242,11 @@ Place PDFs in `data/raw_pdfs/`. Processed state is tracked in `data/processed/in
 | `contradiction.py` `detect_contradiction()` | `isinstance` 型別驗證 | 傳入非 dict 時 raise ValueError，快速暴露呼叫方錯誤 |
 | `nodes.py` `parallel_retrieval()` | `as_completed` + try/except | Tavily / yfinance 個別失敗不影響 RAG 結果 |
 | `app.py` Agent 執行 | try/except + Demo 快取 fallback | Agent 失敗時嘗試載入快取，保底顯示結果 |
-| `app.py` `get_available_quarters()` | facet API → scroll → hardcoded fallback | Qdrant 版本不支援或未啟動時仍能運作 |
+| `app.py` `get_available_quarters()` | BigQuery `SELECT DISTINCT` → hardcoded fallback | BQ 不可用時 UI 仍有預設季度可選 |
+| `retriever.py` `vector_search` / `retrieve_coverage` / `get_company_quarters` | BQ `try/except` → 降級空結果 | BigQuery 失敗時不炸 UI，self_reflect 會偵測弱季並重試 |
 | `retriever.py` `retrieve_coverage()` | `min_score=0.25` gate | 向量相似度不足的季度不強行補充，避免雜訊 |
+| `retriever.py` `_load_min_score_from_env` | 非法 float / 超範圍 → fallback + warning | 環境變數打錯不掛掉服務 |
+| `contradiction.py` `_safe_int_env` | 非整數 env → fallback + warning | LLM_PAIR_WORKERS 設錯不癱瘓 batch |
 
 ### c. 程式效率
 
@@ -252,9 +254,10 @@ Place PDFs in `data/raw_pdfs/`. Processed state is tracked in `data/processed/in
 |---|---|---|
 | **並行 I/O** | `nodes.py` `parallel_retrieval()` | `ThreadPoolExecutor(max_workers=8)`：RAG + Tavily + yfinance 三路同時發出 |
 | **並行分析** | `comparison.py` `run_multi_company()` | `ThreadPoolExecutor(max_workers=2)`：多公司 Agent 同時執行 |
-| **Qdrant Facet API** | `app.py` `get_available_quarters()` | v1.10+ 單次查詢取所有唯一季度值，降級才用 scroll（限 2000 筆） |
+| **BigQuery `SELECT DISTINCT`** | `app.py` `get_available_quarters()` | 單次查詢取唯一季度；BQ serverless 無 scroll 限制 |
+| **單一 PARTITION BY 查詢** | `retriever.py` `retrieve_coverage()` | 用 `ROW_NUMBER() OVER(PARTITION BY quarter)` 一次補多季 top-K，取代過去迴圈多次呼叫 |
 | **PDF bytes 快取** | `app.py` session_state | PDF 僅在結果改變時重新生成，以 `{mode}_{company}_{topic}` 為 key |
-| **Streamlit 函數快取** | `app.py` `@st.cache_data(ttl=300)` | 季度列表快取 5 分鐘，不每次重查 Qdrant |
+| **Streamlit 函數快取** | `app.py` `@st.cache_data(ttl=300)` | 季度列表快取 5 分鐘，不每次重查 BigQuery |
 | **LLM token 截斷** | `contradiction.py` `_MAX_CONTENT=2000` | 每季內容上限 2000 字，防止 prompt 過長導致 API 超時或費用暴增 |
 | **Coverage sweep 門檻** | `retriever.py` `min_score=0.25` | 相似度過低的季度直接跳過，不浪費 LLM 呼叫 |
 
@@ -306,7 +309,9 @@ LangGraph 預設後節點的 state key 會覆蓋前節點。`Annotated[list, ope
 | **API 濫用 / DoS** | Rate limiting：兩次查詢間最短 10 秒冷卻 | `app.py` `_COOLDOWN_SEC = 10` |
 | **非法參數注入** | 公司 / 主題白名單驗證（即使 Streamlit widget 被繞過） | `app.py` `if company not in COMPANIES` |
 | **Token 爆炸攻擊** | LLM prompt 內容截斷（每季 2000 字上限） | `contradiction.py` `_MAX_CONTENT` |
-| **Qdrant 注入** | 公司名稱只能從 COMPANIES 列表取得，不允許任意字串 filter | `app.py` 白名單驗證 |
+| **BigQuery 注入** | 所有使用者參數透過 `ScalarQueryParameter` / `ArrayQueryParameter` 綁定；公司/主題另有白名單驗證 | `retriever.py` + `app.py` 白名單驗證 |
+| **Prompt Injection（深層防禦）** | `contradiction._sanitize_topic` 剝除「」/```/換行 | core 不假設 UI 已清洗 |
+| **BQ 錯誤洩漏** | `_log_bq_error` 截斷至 120 字 + 僅記錄類型 | 防止 project ID / table path / 憑證路徑洩漏到 UI |
 | **投資建議責任** | UI 明顯標示「不提供選股建議」+ 頁腳免責聲明 | `app.py` sidebar + footer |
 
 <!-- SPECKIT START -->

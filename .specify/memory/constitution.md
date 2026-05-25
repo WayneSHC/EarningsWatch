@@ -1,58 +1,61 @@
 <!--
 SYNC IMPACT REPORT
 ==================
-Version change: (uninitialized template) → 1.0.0
-Bump rationale: Initial ratification. Template placeholders replaced with concrete
-  principles; first formal adoption, so version starts at 1.0.0 (MINOR/PATCH N/A).
+Version change: 1.0.0 → 1.0.1
+Bump rationale: PATCH — clarification + correction. No principles added or redefined.
+  (a) Principle I now names `src/ingestion/` as a fourth shared-dependency layer that
+      core MAY depend on; this matches existing code (retriever imports embedder).
+  (b) Technology & Architecture Constraints corrected: the vector store is BigQuery
+      Vector Search, not Qdrant. The original v1.0.0 wording carried over from a
+      Qdrant-era CLAUDE.md that is itself being updated in the same change set.
 
-Modified principles: (none — first adoption)
-Added principles:
-  - I. Layered Architecture (程式架構合理性)
-  - II. Fault Tolerance & Defensive Programming (程式容錯與防呆)
-  - III. Efficiency by Design (程式效率)
-  - IV. Purposeful Comments (適當註解)
-  - V. Full Explainability (能解釋每一行程式碼)
-  - VI. Security First (高安全性)
-Added sections:
-  - Technology & Architecture Constraints
-  - Development Workflow & Quality Gates
+Previous changes (v0 → 1.0.0):
+  - Initial ratification. Six principles derived from CLAUDE.md sections a-f.
+
+Modified principles:
+  - I. Layered Architecture — added ingestion-layer paragraph
+Added sections: (none)
 Removed sections: (none)
 
 Templates requiring updates:
-  ✅ .specify/templates/plan-template.md     — Constitution Check gate aligns (no edit needed)
-  ✅ .specify/templates/spec-template.md     — generic; no principle-driven section change
-  ✅ .specify/templates/tasks-template.md    — generic; task categories compatible
-  ⚠ CLAUDE.md                                — source rubric (sections a-f); keep in sync on amendment
+  ✅ .specify/templates/plan-template.md
+  ✅ .specify/templates/spec-template.md
+  ✅ .specify/templates/tasks-template.md
+  ⚠ CLAUDE.md — multiple Qdrant references being updated in same commit
 
 Follow-up TODOs:
-  - RATIFICATION_DATE set to 2026-05-22 (constitution first formalized today); revise if
-    the project defines an earlier official adoption date.
+  - RATIFICATION_DATE remains 2026-05-22 (v1.0.0 ratification date).
 -->
 
 # EarningsWatch Constitution
 
 EarningsWatch is a Python RAG application that detects tone/stance contradictions across
 corporate earnings calls. It is built as a three-layer system: a Streamlit UI, a LangGraph
-7-node agent, and a Core layer (LLM client, Qdrant client, retriever, contradiction
-detection). This constitution codifies the non-negotiable engineering standards that every
-change MUST satisfy.
+7-node agent, and a Core layer (LLM client, BigQuery client, retriever, contradiction
+detection), with a supporting Ingestion layer that produces the corpus the Core layer reads.
+This constitution codifies the non-negotiable engineering standards that every change MUST
+satisfy.
 
 ## Core Principles
 
 ### I. Layered Architecture (程式架構合理性)
 
-The codebase MUST preserve a strict three-layer separation:
+The codebase MUST preserve a strict layered separation:
 
 - **UI layer** (`src/ui/`) — Streamlit pages, charts, export. MUST NOT contain business logic.
-- **Agent layer** (`src/agent/`) — LangGraph 7-node orchestration only. MUST NOT call Qdrant
-  directly; it delegates retrieval to the Core layer.
-- **Core layer** (`src/core/`) — LLM client, Qdrant client, retriever, contradiction
+- **Agent layer** (`src/agent/`) — LangGraph 7-node orchestration only. MUST NOT call the
+  vector store directly; it delegates retrieval to the Core layer.
+- **Core layer** (`src/core/`) — LLM client, BigQuery client, retriever, contradiction
   detection. Each module MUST be independently testable.
+- **Ingestion layer** (`src/ingestion/`) — corpus preparation: PDF parsing, chunking,
+  embedding. Treated as a shared dependency layer: **Core MAY import from Ingestion**
+  (e.g. `embed_query_texts`); the reverse is prohibited. UI and Agent MUST NOT depend on
+  Ingestion directly.
 
 Each layer has a single responsibility and MUST NOT reach into the internals of another.
-Shared resources MUST use the singleton accessor (`get_qdrant_client()` via `lru_cache`) —
-direct `QdrantClient` instantiation is prohibited. Inter-node state MUST flow through the
-typed `AgentState` TypedDict.
+Shared resources MUST use the singleton accessor (e.g. `get_bq_client()` via `lru_cache`) —
+direct client instantiation is prohibited. Inter-node state MUST flow through the typed
+`AgentState` TypedDict.
 
 Rationale: Single-responsibility layers keep modules unit-testable and prevent the coupling
 that makes RAG pipelines brittle.
@@ -66,7 +69,7 @@ External calls MUST fail soft, never crash the pipeline:
 - Each independent unit of batch work (e.g. a quarter-pair in `batch_detect`, a retrieval
   source in `parallel_retrieval`) MUST be wrapped in its own try/except so one failure does
   not abort the batch.
-- External-service calls (LLM backends, Tavily, yfinance, Qdrant) MUST degrade gracefully:
+- External-service calls (LLM backends, Tavily, yfinance, BigQuery) MUST degrade gracefully:
   backend fallback cascade, cached-result fallback, or hardcoded fallback as last resort.
 - Inputs at function boundaries MUST be type-validated; invalid arguments MUST raise early
   with a clear error rather than failing deep in the call stack.
@@ -135,8 +138,8 @@ NON-NEGOTIABLE:
 - **API abuse / DoS** — request rate limiting MUST be enforced (session cooldown + IP-based
   cooldown).
 - **Illegal parameter injection** — company/topic values MUST be validated against a
-  whitelist even if the UI widget is bypassed; Qdrant filters MUST only use whitelisted
-  values.
+  whitelist even if the UI widget is bypassed; BigQuery query parameters MUST be bound
+  via `ScalarQueryParameter` / `ArrayQueryParameter`, never string-interpolated.
 - **Token-explosion** — LLM prompt content MUST be truncated to bounded length.
 - **Liability** — the UI MUST display the "no stock-picking advice" disclaimer.
 
@@ -148,8 +151,9 @@ attacks; security controls are mandatory acceptance criteria, not enhancements.
 
 ## Technology & Architecture Constraints
 
-- **Stack**: Python, Streamlit (UI), LangGraph (agent orchestration), Qdrant (vector DB,
-  cosine distance, collection `earnings_calls`).
+- **Stack**: Python, Streamlit (UI), LangGraph (agent orchestration), **BigQuery Vector
+  Search** (`VECTOR_SEARCH(... distance_type => 'COSINE')`) as the vector store with
+  Cohere `rerank-v3.5` as the second-stage reranker.
 - **LLM backends**: multi-backend cascade (`gemini → openai → anthropic → cohere`) behind a
   single `chat()` entrypoint; backends MUST be hot-swappable and fall through on
   quota/429/401/404/503.
@@ -192,4 +196,4 @@ and MUST be kept consistent with this document.
 - **Runtime guidance**: CLAUDE.md provides the day-to-day development guidance that
   implements these principles.
 
-**Version**: 1.0.0 | **Ratified**: 2026-05-22 | **Last Amended**: 2026-05-22
+**Version**: 1.0.1 | **Ratified**: 2026-05-22 | **Last Amended**: 2026-05-22
