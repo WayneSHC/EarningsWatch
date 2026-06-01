@@ -7,6 +7,7 @@ EarningsWatch Streamlit 主介面（薄殼）
 """
 
 # ── 修正 Streamlit 工作目錄問題（確保 src/ 可被 import）──────────────────────
+import os
 import sys
 from pathlib import Path
 _PROJECT_ROOT = Path(__file__).parent.parent.parent
@@ -19,6 +20,18 @@ from datetime import date  # noqa: F401  (kept for future date-stamped messages)
 from dotenv import load_dotenv
 
 load_dotenv(_PROJECT_ROOT / ".env")
+
+# [b] Streamlit Cloud 把密鑰放在 st.secrets，不會自動進 os.environ。
+#     本機開發走 .env（上一行的 load_dotenv 已處理），雲端則靠這段把頂層
+#     字串 secrets 鏡像到 os.environ，讓所有 os.getenv() 與 secrets.py 的
+#     GCP_SECRET_PROJECT 偵測都能照常運作。不覆寫已存在的環境變數。
+try:
+    import streamlit as _st_bootstrap
+    for _k, _v in dict(_st_bootstrap.secrets).items():
+        if isinstance(_v, str) and not os.environ.get(_k, "").strip():
+            os.environ[_k] = _v
+except Exception:
+    pass  # 本機 / 無 st.secrets：交給 .env 即可
 
 # [f] Bridge LangSmith key from GCP Secret Manager → os.environ so LangChain's
 # tracing layer (which reads env vars directly) can pick it up. Tavily /
