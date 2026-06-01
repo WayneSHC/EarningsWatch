@@ -16,9 +16,28 @@ TABLE_ID = "earnings_calls"
 # [f] 只允許 GCP project/dataset/table ID 的合法字元，防止 SQL f-string 注入
 _SAFE_BQ_ID_RE = re.compile(r"^[a-zA-Z0-9_\-]+$")
 
+
+def _credentials_from_streamlit_secrets():
+    # [b] Streamlit Cloud 沒有 ADC。當 st.secrets 內含 gcp_service_account
+    #     表格時，直接建構 Credentials；其他情況（本機 / Cloud Run）回 None
+    #     讓 bigquery.Client 走預設 ADC 流程。
+    try:
+        import streamlit as st
+        from google.oauth2 import service_account
+    except ImportError:
+        return None
+    try:
+        sa_info = st.secrets["gcp_service_account"]
+    except Exception:
+        return None
+    return service_account.Credentials.from_service_account_info(dict(sa_info))
+
 @lru_cache(maxsize=1)
 def get_bq_client() -> bigquery.Client:
-    """回傳 singleton BigQuery Client。無金鑰認證（使用 ADC）。"""
+    """回傳 singleton BigQuery Client。優先讀 Streamlit secrets，否則走 ADC。"""
+    creds = _credentials_from_streamlit_secrets()
+    if creds is not None:
+        return bigquery.Client(project=PROJECT_ID, credentials=creds)
     return bigquery.Client(project=PROJECT_ID)
 
 def get_table_path() -> str:
