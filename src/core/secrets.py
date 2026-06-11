@@ -138,3 +138,40 @@ def bridge_to_env(*names: str) -> None:
         val = get_secret(name)
         if val:
             os.environ[name] = val
+
+
+def bridge_streamlit_secrets_to_env() -> None:
+    """
+    Mirror top-level *string* secrets from st.secrets into os.environ.
+
+    Streamlit Cloud only exposes secrets via st.secrets — never env vars —
+    while the rest of the codebase (os.getenv consumers, _gcp_project,
+    LangChain's direct os.environ reads) assumes env vars. Call this once at
+    app startup, right after load_dotenv.
+
+    Rules:
+      - Only top-level string values are mirrored. TOML tables (e.g.
+        [gcp_service_account]) stay in st.secrets — bq_client reads them
+        there directly. Unquoted TOML numbers are skipped, hence the
+        "quote every value" note in secrets.toml.example.
+      - Never overwrites an env var that is already set and non-blank —
+        .env / shell always win locally.
+      - No secrets.toml at all (local dev) → silent no-op.
+      - A malformed secrets.toml prints a warning instead of failing the
+        boot, so a cloud operator can tell why keys appear "missing".
+    """
+    try:
+        import streamlit as st
+        secrets_map = dict(st.secrets)
+    except ImportError:
+        return
+    except FileNotFoundError:
+        # Includes StreamlitSecretNotFoundError — the normal local case.
+        return
+    except Exception as exc:
+        print(f"[secrets] ⚠ st.secrets 解析失敗（{type(exc).__name__}），僅使用 .env / 環境變數")
+        return
+
+    for key, val in secrets_map.items():
+        if isinstance(val, str) and not os.environ.get(key, "").strip():
+            os.environ[key] = val

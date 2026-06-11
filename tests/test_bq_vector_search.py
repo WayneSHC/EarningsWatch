@@ -45,6 +45,93 @@ class TestBqClient:
 
 
 # ──────────────────────────────────────────────────────────────────────────
+# Streamlit secrets → service-account credentials + project resolution
+# ──────────────────────────────────────────────────────────────────────────
+
+class TestStreamlitSecretsCredentials:
+    def test_sa_info_none_when_secrets_missing(self, monkeypatch):
+        """無 secrets.toml（st.secrets 取值丟例外）→ 回 None，不丟出。"""
+        import sys
+        import types
+
+        class _NoSecrets:
+            def __getitem__(self, key):
+                raise FileNotFoundError("No secrets files found")
+
+        fake_st = types.ModuleType("streamlit")
+        fake_st.secrets = _NoSecrets()
+        monkeypatch.setitem(sys.modules, "streamlit", fake_st)
+
+        assert bqc_mod._sa_info_from_streamlit_secrets() is None
+
+    def test_sa_info_returns_dict_when_present(self, monkeypatch):
+        import sys
+        import types
+
+        fake_st = types.ModuleType("streamlit")
+        fake_st.secrets = {"gcp_service_account": {"project_id": "sa-proj"}}
+        monkeypatch.setitem(sys.modules, "streamlit", fake_st)
+
+        info = bqc_mod._sa_info_from_streamlit_secrets()
+        assert info == {"project_id": "sa-proj"}
+
+    def test_resolve_project_id_env_wins(self, monkeypatch):
+        monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "env-proj")
+        monkeypatch.setattr(bqc_mod, "_sa_info_from_streamlit_secrets",
+                            lambda: {"project_id": "sa-proj"})
+        assert bqc_mod._resolve_project_id() == "env-proj"
+
+    def test_resolve_project_id_falls_back_to_sa_project(self, monkeypatch):
+        monkeypatch.delenv("GOOGLE_CLOUD_PROJECT", raising=False)
+        monkeypatch.setattr(bqc_mod, "_sa_info_from_streamlit_secrets",
+                            lambda: {"project_id": "sa-proj"})
+        assert bqc_mod._resolve_project_id() == "sa-proj"
+
+    def test_resolve_project_id_default_when_nothing_set(self, monkeypatch):
+        monkeypatch.delenv("GOOGLE_CLOUD_PROJECT", raising=False)
+        monkeypatch.setattr(bqc_mod, "_sa_info_from_streamlit_secrets",
+                            lambda: None)
+        assert bqc_mod._resolve_project_id() == "earningswatch-demo"
+
+    def test_client_uses_sa_credentials_when_present(self, monkeypatch):
+        """st.secrets 有 SA → Client 收到 credentials 參數。"""
+        sentinel_creds = object()
+        captured = {}
+
+        def fake_client(**kw):
+            captured.update(kw)
+            return object()
+
+        monkeypatch.setattr(bqc_mod, "_credentials_from_streamlit_secrets",
+                            lambda: sentinel_creds)
+        monkeypatch.setattr(bqc_mod.bigquery, "Client", fake_client)
+        bqc_mod.get_bq_client.cache_clear()
+
+        bqc_mod.get_bq_client()
+
+        assert captured.get("credentials") is sentinel_creds
+        bqc_mod.get_bq_client.cache_clear()
+
+    def test_client_adc_fallback_without_secrets(self, monkeypatch):
+        """無 SA secrets → Client 不帶 credentials（走 ADC）。"""
+        captured = {}
+
+        def fake_client(**kw):
+            captured.update(kw)
+            return object()
+
+        monkeypatch.setattr(bqc_mod, "_credentials_from_streamlit_secrets",
+                            lambda: None)
+        monkeypatch.setattr(bqc_mod.bigquery, "Client", fake_client)
+        bqc_mod.get_bq_client.cache_clear()
+
+        bqc_mod.get_bq_client()
+
+        assert "credentials" not in captured
+        bqc_mod.get_bq_client.cache_clear()
+
+
+# ──────────────────────────────────────────────────────────────────────────
 # ensure_dataset_and_table — idempotent
 # ──────────────────────────────────────────────────────────────────────────
 

@@ -7,7 +7,6 @@ EarningsWatch Streamlit 主介面（薄殼）
 """
 
 # ── 修正 Streamlit 工作目錄問題（確保 src/ 可被 import）──────────────────────
-import os
 import sys
 from pathlib import Path
 _PROJECT_ROOT = Path(__file__).parent.parent.parent
@@ -25,18 +24,15 @@ load_dotenv(_PROJECT_ROOT / ".env")
 #     本機開發走 .env（上一行的 load_dotenv 已處理），雲端則靠這段把頂層
 #     字串 secrets 鏡像到 os.environ，讓所有 os.getenv() 與 secrets.py 的
 #     GCP_SECRET_PROJECT 偵測都能照常運作。不覆寫已存在的環境變數。
-try:
-    import streamlit as _st_bootstrap
-    for _k, _v in dict(_st_bootstrap.secrets).items():
-        if isinstance(_v, str) and not os.environ.get(_k, "").strip():
-            os.environ[_k] = _v
-except Exception:
-    pass  # 本機 / 無 st.secrets：交給 .env 即可
+#     必須在任何 src.core.* 模組 import 之前執行（bq_client 在 import 時讀
+#     GOOGLE_CLOUD_PROJECT）。實作位於 src/core/secrets.py，含單元測試。
+from src.core.secrets import bridge_streamlit_secrets_to_env, bridge_to_env  # noqa: E402
+
+bridge_streamlit_secrets_to_env()
 
 # [f] Bridge LangSmith key from GCP Secret Manager → os.environ so LangChain's
 # tracing layer (which reads env vars directly) can pick it up. Tavily /
 # LlamaParse don't need this — they call get_secret() explicitly.
-from src.core.secrets import bridge_to_env  # noqa: E402
 bridge_to_env("LANGSMITH_API_KEY")
 
 import streamlit as st

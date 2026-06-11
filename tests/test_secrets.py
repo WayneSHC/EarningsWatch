@@ -297,3 +297,79 @@ class TestBridgeToEnv:
 
         import os
         assert "MAYBE_KEY" not in os.environ
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# bridge_streamlit_secrets_to_env — st.secrets → os.environ 鏡像
+# ──────────────────────────────────────────────────────────────────────────
+
+def _fake_streamlit(monkeypatch, secrets_obj):
+    """Inject a fake `streamlit` module whose .secrets is `secrets_obj`."""
+    import sys
+    import types
+
+    fake_st = types.ModuleType("streamlit")
+    fake_st.secrets = secrets_obj
+    monkeypatch.setitem(sys.modules, "streamlit", fake_st)
+
+
+class _RaisingSecrets:
+    """dict(st.secrets) triggers .keys() — raise the configured exception."""
+
+    def __init__(self, exc):
+        self._exc = exc
+
+    def keys(self):
+        raise self._exc
+
+
+class TestBridgeStreamlitSecretsToEnv:
+    def test_mirrors_string_secrets_into_empty_env(self, monkeypatch):
+        monkeypatch.delenv("BRIDGE_TEST_KEY", raising=False)
+        _fake_streamlit(monkeypatch, {"BRIDGE_TEST_KEY": "from-secrets"})
+
+        secrets_mod.bridge_streamlit_secrets_to_env()
+
+        import os
+        assert os.environ.get("BRIDGE_TEST_KEY") == "from-secrets"
+
+    def test_does_not_overwrite_existing_env(self, monkeypatch):
+        monkeypatch.setenv("BRIDGE_TEST_KEY", "from-dotenv")
+        _fake_streamlit(monkeypatch, {"BRIDGE_TEST_KEY": "from-secrets"})
+
+        secrets_mod.bridge_streamlit_secrets_to_env()
+
+        import os
+        assert os.environ["BRIDGE_TEST_KEY"] == "from-dotenv"
+
+    def test_skips_non_string_values(self, monkeypatch):
+        monkeypatch.delenv("BRIDGE_NUM", raising=False)
+        monkeypatch.delenv("gcp_service_account", raising=False)
+        _fake_streamlit(monkeypatch, {
+            "BRIDGE_NUM": 0.5,                       # 未加引號的 TOML 數字
+            "gcp_service_account": {"type": "x"},    # TOML 表格
+        })
+
+        secrets_mod.bridge_streamlit_secrets_to_env()
+
+        import os
+        assert "BRIDGE_NUM" not in os.environ
+        assert "gcp_service_account" not in os.environ
+
+    def test_missing_secrets_file_is_silent(self, monkeypatch, capsys):
+        """本機無 secrets.toml（FileNotFoundError）→ 無輸出、不丟出。"""
+        _fake_streamlit(monkeypatch,
+                        _RaisingSecrets(FileNotFoundError("No secrets files found")))
+
+        secrets_mod.bridge_streamlit_secrets_to_env()
+
+        assert capsys.readouterr().out == ""
+
+    def test_parse_error_prints_warning(self, monkeypatch, capsys):
+        """secrets.toml 存在但壞掉（如 TOML 語法錯誤）→ 警告但不中斷啟動。"""
+        _fake_streamlit(monkeypatch, _RaisingSecrets(ValueError("bad TOML")))
+
+        secrets_mod.bridge_streamlit_secrets_to_env()
+
+        out = capsys.readouterr().out
+        assert "st.secrets" in out and "⚠" in out
