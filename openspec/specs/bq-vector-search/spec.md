@@ -6,9 +6,15 @@
 
 ## Requirements
 
-### Requirement: BigQuery client SHALL 以 `lru_cache` 單例化
+### Requirement: BigQuery client SHALL 以 `lru_cache` 單例化，憑證二段解析
 
-`get_bq_client()`（`src/core/bq_client.py`）MUST 使用 `lru_cache(maxsize=1)` 回傳 `bigquery.Client(project=PROJECT_ID)`；MUST 不傳 credentials 參數（依賴 ADC / GCP runtime 預設認證）。`PROJECT_ID` MUST 取自 `GOOGLE_CLOUD_PROJECT` 環境變數，缺值時退回 `"earningswatch-demo"`。
+`get_bq_client()`（`src/core/bq_client.py`）MUST 使用 `lru_cache(maxsize=1)` 回傳單例 `bigquery.Client`。憑證解析二段式：
+1. 若 `st.secrets["gcp_service_account"]` 存在（Streamlit Cloud，無 ADC）→ 以 `service_account.Credentials.from_service_account_info(...)` 建構並傳入 `credentials` 參數
+2. 否則 MUST 不傳 credentials 參數（依賴 ADC / GCP runtime 預設認證）
+
+`streamlit` import MUST 是 guarded soft-import（ImportError / 無 secrets → 走 ADC），此為 core 層唯一獲准的 streamlit 依賴（constitution v1.0.2 Principle I 例外）。金鑰存在但格式損壞 MUST 大聲失敗，不得靜默退回 ADC。
+
+`PROJECT_ID` MUST 依序解析：`GOOGLE_CLOUD_PROJECT` 環境變數 → SA 金鑰內的 `project_id` → `"earningswatch-demo"`；client 與 `get_table_path()` MUST 使用同一解析結果。
 
 #### Scenario: 連續呼叫共用 client
 - **WHEN** `get_bq_client()` 連續呼叫兩次
@@ -18,6 +24,21 @@
 - **GIVEN** `GOOGLE_CLOUD_PROJECT=my-proj`
 - **WHEN** 模組被重新載入並呼叫 `get_bq_client()`
 - **THEN** client 的 `project == "my-proj"`
+
+#### Scenario: st.secrets 有 SA 金鑰時用 SA 憑證
+- **GIVEN** `st.secrets["gcp_service_account"]` 為有效 SA dict
+- **WHEN** `get_bq_client()` 被呼叫
+- **THEN** `bigquery.Client` 收到 `credentials` 參數
+
+#### Scenario: 無 SA 金鑰時走 ADC
+- **GIVEN** 無 `secrets.toml`（或不含 `gcp_service_account`）
+- **WHEN** `get_bq_client()` 被呼叫
+- **THEN** `bigquery.Client` 建構參數不含 `credentials`
+
+#### Scenario: 只設 SA 金鑰時 project 退回 SA project_id
+- **GIVEN** `GOOGLE_CLOUD_PROJECT` 未設、SA dict 內 `project_id == "sa-proj"`
+- **WHEN** `_resolve_project_id()` 被呼叫
+- **THEN** 回傳 `"sa-proj"`
 
 ### Requirement: `get_table_path()` SHALL 回傳完整路徑
 

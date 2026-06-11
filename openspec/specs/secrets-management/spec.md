@@ -2,7 +2,7 @@
 
 ## Purpose
 
-定義 `src/core/secrets.py` 對敏感資料（API keys、tokens）的解析行為：GCP Secret Manager 優先、`.env` / 環境變數 fallback、placeholder 字串視為缺值、Secret Manager 失敗時 graceful degrade、`bridge_to_env` 把 SM secrets 注入 `os.environ` 供第三方 SDK 使用。本 spec 確保 production（Cloud Run + Secret Manager）與本機開發（.env）能用同一段呼叫端程式，且 Secret Manager 服務中斷時應用仍能啟動。
+定義 `src/core/secrets.py` 對敏感資料（API keys、tokens）的解析行為：GCP Secret Manager 優先、`.env` / 環境變數 fallback、placeholder 字串視為缺值、Secret Manager 失敗時 graceful degrade、`bridge_to_env` 把 SM secrets 注入 `os.environ` 供第三方 SDK 使用、`bridge_streamlit_secrets_to_env` 把 Streamlit Cloud 的 `st.secrets` 鏡像到 `os.environ`。本 spec 確保 production（Cloud Run + Secret Manager）、Streamlit Cloud（st.secrets）與本機開發（.env）能用同一段呼叫端程式，且任一 secret 來源中斷時應用仍能啟動。
 
 ## Requirements
 
@@ -119,3 +119,36 @@
 - **GIVEN** `get_secret("X")` 回傳 `""`、`os.environ` 不含 `X`
 - **WHEN** `bridge_to_env("X")` 被呼叫
 - **THEN** `os.environ` 仍不含 `X`
+
+### Requirement: `bridge_streamlit_secrets_to_env()` SHALL 把頂層字串 secrets 鏡像到 env 且不覆寫
+
+`bridge_streamlit_secrets_to_env()` MUST 在 app 啟動時（`load_dotenv` 之後、任何 `src.core` import 之前）把 `st.secrets` 的頂層 *字串* 值逐一鏡像到 `os.environ`，規則：
+1. 已設定且非空白的 env var MUST 不被覆寫（`.env` / shell 永遠優先）
+2. 非字串值（TOML 表格如 `[gcp_service_account]`、未加引號的數字）MUST 略過不轉型
+3. 無 `secrets.toml`（`FileNotFoundError`，含 Streamlit 的 `StreamlitSecretNotFoundError` 子類）MUST 靜默 no-op
+4. 其他讀取 / 解析失敗 MUST 印出含例外型別的單行警告後繼續啟動，MUST 不 crash、MUST 不印出 secret 值
+
+#### Scenario: 字串 secret 填入空 env
+- **GIVEN** `os.environ` 不含 `FOO`、`st.secrets == {"FOO": "from-secrets"}`
+- **WHEN** `bridge_streamlit_secrets_to_env()` 被呼叫
+- **THEN** `os.environ["FOO"] == "from-secrets"`
+
+#### Scenario: 已設 env 不被覆寫
+- **GIVEN** `os.environ["FOO"] == "from-dotenv"`、`st.secrets == {"FOO": "from-secrets"}`
+- **WHEN** `bridge_streamlit_secrets_to_env()` 被呼叫
+- **THEN** `os.environ["FOO"] == "from-dotenv"`（未變）
+
+#### Scenario: 非字串值被略過
+- **GIVEN** `st.secrets` 含 `{"NUM": 0.5, "gcp_service_account": {...}}`
+- **WHEN** `bridge_streamlit_secrets_to_env()` 被呼叫
+- **THEN** `os.environ` 不含 `NUM` 也不含 `gcp_service_account`
+
+#### Scenario: 本機無 secrets.toml 靜默通過
+- **GIVEN** 存取 `st.secrets` raise `FileNotFoundError`
+- **WHEN** `bridge_streamlit_secrets_to_env()` 被呼叫
+- **THEN** 無任何 stdout 輸出、不 raise
+
+#### Scenario: secrets.toml 壞掉時警告但不中斷
+- **GIVEN** 存取 `st.secrets` raise `ValueError`（如 TOML 語法錯誤）
+- **WHEN** `bridge_streamlit_secrets_to_env()` 被呼叫
+- **THEN** stdout 含 `st.secrets` 與 `⚠` 字樣、不 raise

@@ -156,3 +156,25 @@ class TestLLMClientIntegration:
         assert s["failed_calls"] == 1
         assert s["by_backend"]["openai"]["calls"] == 1
         assert s["by_backend"]["gemini"]["calls"] == 1
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# _PRICING ↔ BACKEND_MODELS 一致性 gate（spec 004 SC-009）
+# ──────────────────────────────────────────────────────────────────────────
+
+class TestPricingCoverage:
+    def test_every_active_model_has_pricing(self):
+        """換模型的 PR 必須同步補 _PRICING，否則 cost guard / sidebar 成本歸零失真。"""
+        from src.core.llm_client import BACKEND_MODELS
+
+        missing = [
+            (backend, model)
+            for backend, models in BACKEND_MODELS.items()
+            for model in set(models.values())
+            if (backend, model) not in telemetry._PRICING
+        ]
+        assert not missing, (
+            f"BACKEND_MODELS 中的模型缺 _PRICING 定價：{missing}。"
+            "請在 src/core/telemetry.py 的 _PRICING 補上 (input, output) 單價"
+            "（估算值請加 'estimated, verify' 註記）。"
+        )

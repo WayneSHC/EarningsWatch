@@ -1,27 +1,35 @@
 <!--
 SYNC IMPACT REPORT
 ==================
-Version change: 1.0.0 → 1.0.1
-Bump rationale: PATCH — clarification + correction. No principles added or redefined.
-  (a) Principle I now names `src/ingestion/` as a fourth shared-dependency layer that
-      core MAY depend on; this matches existing code (retriever imports embedder).
+Version change: 1.0.1 → 1.0.2
+Bump rationale: PATCH — clarification + recording an existing-code exception. No
+principles added or redefined.
+  (a) Principle I now records the single sanctioned core→streamlit soft-import:
+      `src/core/bq_client.py` reads `st.secrets["gcp_service_account"]` to build
+      BigQuery credentials on Streamlit Cloud (no ADC there). The import is guarded
+      (ImportError / missing secrets degrade to ADC) so core stays independently
+      testable. Matches CLAUDE.md and specs/005-deployment-secrets.
+  (b) Governance now documents the division between the two spec systems:
+      OpenSpec (capability-level, CI-validated) vs Spec Kit (subsystem-level audits).
+
+Previous changes (1.0.0 → 1.0.1):
+  (a) Principle I named `src/ingestion/` as a fourth shared-dependency layer that
+      core MAY depend on; matches existing code (retriever imports embedder).
   (b) Technology & Architecture Constraints corrected: the vector store is BigQuery
-      Vector Search, not Qdrant. The original v1.0.0 wording carried over from a
-      Qdrant-era CLAUDE.md that is itself being updated in the same change set.
+      Vector Search, not Qdrant.
 
 Previous changes (v0 → 1.0.0):
   - Initial ratification. Six principles derived from CLAUDE.md sections a-f.
 
 Modified principles:
-  - I. Layered Architecture — added ingestion-layer paragraph
+  - I. Layered Architecture — added sanctioned-exception paragraph
 Added sections: (none)
 Removed sections: (none)
+Modified sections:
+  - Governance — added "Specification systems" paragraph
 
 Templates requiring updates:
-  ✅ .specify/templates/plan-template.md
-  ✅ .specify/templates/spec-template.md
-  ✅ .specify/templates/tasks-template.md
-  ⚠ CLAUDE.md — multiple Qdrant references being updated in same commit
+  ✅ (none — no template-facing changes)
 
 Follow-up TODOs:
   - RATIFICATION_DATE remains 2026-05-22 (v1.0.0 ratification date).
@@ -56,6 +64,12 @@ Each layer has a single responsibility and MUST NOT reach into the internals of 
 Shared resources MUST use the singleton accessor (e.g. `get_bq_client()` via `lru_cache`) —
 direct client instantiation is prohibited. Inter-node state MUST flow through the typed
 `AgentState` TypedDict.
+
+**Sanctioned exception**: `src/core/bq_client.py` MAY soft-import `streamlit` solely to
+read `st.secrets["gcp_service_account"]` for BigQuery credentials on Streamlit Cloud
+(which has no ADC). The import MUST stay guarded — `ImportError` or missing secrets
+degrade to ADC — so core remains independently testable without a Streamlit runtime.
+No other core module may import `streamlit`; new needs require a constitution amendment.
 
 Rationale: Single-responsibility layers keep modules unit-testable and prevent the coupling
 that makes RAG pipelines brittle.
@@ -195,5 +209,13 @@ and MUST be kept consistent with this document.
   appears to violate Principle III or V MUST be justified in the PR description or rejected.
 - **Runtime guidance**: CLAUDE.md provides the day-to-day development guidance that
   implements these principles.
+- **Specification systems**: the project keeps two complementary spec trees with distinct
+  roles. `openspec/specs/` holds **capability-level living specs** (one per shipped
+  capability, validated by the OpenSpec CI drift check on every PR) — it is the source of
+  truth for "what the system does". `specs/` (Spec Kit) holds **subsystem-level as-built
+  audit specs** (user stories, FR/SC inventories, constitution traceability) used for deep
+  reviews and `/speckit-*` analysis. Behavior changes MUST update the affected OpenSpec
+  capability spec; Spec Kit specs SHOULD be refreshed when their subsystem changes
+  materially (new FRs appended with stable IDs, never renumbered).
 
-**Version**: 1.0.1 | **Ratified**: 2026-05-22 | **Last Amended**: 2026-05-22
+**Version**: 1.0.2 | **Ratified**: 2026-05-22 | **Last Amended**: 2026-06-11

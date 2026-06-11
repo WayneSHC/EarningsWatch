@@ -219,7 +219,7 @@ When `LANGSMITH_TRACING=true` (or `LANGCHAIN_TRACING_V2=true`) AND a `LANGSMITH_
 - **SC-001**: For the benchmark suite, the agent produces a non-empty `final_report` for ≥ 98% of queries (failure budget reserved for catastrophic ext-service outages).
 - **SC-002**: The self-reflection loop triggers (≥ 1 retry) on ≥ 30% of benchmark queries — proves the loop is exercised, not a no-op.
 - **SC-003**: Across the benchmark suite, **0** queries exceed `2 × LLM_BUDGET_USD` (cost guard works under load).
-- **SC-004**: For queries where the corpus genuinely doesn't cover the topic, the abstain or off-topic path triggers ≥ 90% of the time — measured against a curated set of out-of-corpus queries.
+- **SC-004**: For queries where the corpus genuinely doesn't cover the topic, the abstain or off-topic path triggers ≥ 90% of the time — measured by `python tests/benchmark.py --type outofcorpus` (section F: 5-question curated out-of-corpus set, asserting `abstain=True` or the off-topic report marker).
 - **SC-005**: `should_continue` is verifiably pure — running it twice on identical state returns the same result with no observable side effect (testable via mocking).
 - **SC-006**: When any one of {LLM backend, BigQuery, Tavily, yfinance} fails on a query, the agent still produces *some* report (graceful degradation), verified by injection tests.
 - **SC-007**: HTML escaping: **0** un-escaped LLM-returned strings reach the final `final_report` (testable via grep for unescaped `<` in report bytes given an LLM stub returning `<script>`).

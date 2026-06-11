@@ -1,6 +1,6 @@
 """
 tests/benchmark.py
-30 題 Benchmark 測試集 — 量化驗證五項核心指標
+35 題 Benchmark 測試集 — 量化驗證六項核心指標
 
 測試類型：
   A. 矛盾偵測正確率（目標 ≥ 80%）— 20 題
@@ -8,6 +8,7 @@ tests/benchmark.py
   C. 來源引用率（目標 ≥ 90%）— 抽查
   D. Self-Reflection 觸發率（目標 ≥ 30%）— 抽查
   E. 承諾追蹤正確率（目標 ≥ 75%）— 嵌入矛盾測試中評估
+  F. 語料外主題 abstain/off-topic 觸發率（目標 ≥ 90%）— 5 題（spec 003 SC-004）
 
 使用方式：
     python tests/benchmark.py                        # 執行全部測試
@@ -15,6 +16,7 @@ tests/benchmark.py
     python tests/benchmark.py --type hallucination   # 只跑幻覺測試
     python tests/benchmark.py --type citation        # 只跑來源引用率
     python tests/benchmark.py --type reflection      # 只跑 Self-Reflection 觸發率
+    python tests/benchmark.py --type outofcorpus     # 只跑語料外主題測試
     python tests/benchmark.py --output my_report.json  # 自訂報告路徑
 """
 
@@ -245,6 +247,41 @@ HALLUCINATION_TESTS = [
 ]
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# F. 語料外主題測試集（5 題）— spec 003 SC-004
+#    主題刻意選法說會逐字稿絕不會涵蓋的領域；期望 agent 走 abstain 或
+#    off-topic 路徑（跳過跨季比對，改以新聞補充或明示資料不足），
+#    而非硬擠出一份看似正常的分析報告。
+# ══════════════════════════════════════════════════════════════════════════════
+OUT_OF_CORPUS_TESTS = [
+    {
+        "id": "O001",
+        "company": "台積電", "topic": "員工餐廳菜色",
+        "description": "公司在語料內、主題完全不可能出現在法說會",
+    },
+    {
+        "id": "O002",
+        "company": "台積電", "topic": "職業棒球隊贊助",
+        "description": "體育贊助主題，逐字稿不會討論",
+    },
+    {
+        "id": "O003",
+        "company": "台積電", "topic": "元宇宙社群平台經營",
+        "description": "非本業的消費性網路主題",
+    },
+    {
+        "id": "O004",
+        "company": "聯發科", "topic": "觀光飯店事業",
+        "description": "與半導體完全無關的產業主題",
+    },
+    {
+        "id": "O005",
+        "company": "台積電", "topic": "寵物食品市場",
+        "description": "毫無關聯的消費品主題",
+    },
+]
+
+
 def run_contradiction_tests(tests: list[dict], with_ragas: bool = False,
                              ragas_sample: int | None = None) -> dict:
     """執行矛盾偵測測試，回傳統計結果。
@@ -425,6 +462,70 @@ def run_hallucination_tests(tests: list[dict]) -> dict:
     }
 
 
+def run_out_of_corpus_tests(tests: list[dict]) -> dict:
+    """
+    執行語料外主題測試（spec 003 SC-004）。
+    判斷邏輯：agent 必須走以下任一路徑才算「正確觸發」：
+      - abstain：state["abstain"] is True（報告為「資料不足，無法完成分析」）
+      - off-topic：報告含「本主題未在法說會逐字稿中找到相關內容」
+        （跳過跨季比對 / 承諾追蹤，改以網路新聞補充）
+    兩者皆未觸發 → agent 對語料外主題硬產出了分析報告，視為失敗。
+    """
+    from src.agent.graph import run_agent
+
+    _OFF_TOPIC_MARKER = "本主題未在法說會逐字稿中找到相關內容"
+    _ABSTAIN_MARKER = "資料不足，無法完成分析"
+
+    triggered = 0
+    total = len(tests)
+    results = []
+
+    for t in tests:
+        print(f"\n[{t['id']}] {t['description']}")
+        try:
+            start = time.time()
+            state = run_agent(
+                query=f"{t['company']} {t['topic']} 的最新狀況",
+                company=t["company"],
+                topic=t["topic"],
+            )
+            elapsed = time.time() - start
+
+            report = state.get("final_report", "")
+            abstained = state.get("abstain") is True or _ABSTAIN_MARKER in report
+            off_topic = _OFF_TOPIC_MARKER in report
+            is_correct = abstained or off_topic
+
+            if is_correct:
+                triggered += 1
+                path = "abstain" if abstained else "off-topic"
+                print(f"  ✅ 正確觸發 {path} 路徑（{elapsed:.1f}s）")
+            else:
+                print("  ❌ 未觸發 abstain / off-topic，agent 對語料外主題產出了分析報告")
+                print(f"     報告前 200 字：{report[:200]}...")
+
+            results.append({
+                "id":        t["id"],
+                "correct":   is_correct,
+                "abstained": abstained,
+                "off_topic": off_topic,
+                "elapsed":   elapsed,
+                "report_head": report[:300],
+            })
+
+        except Exception as e:
+            # [b] agent 例外不中止整批；該題計為未觸發
+            print(f"  💥 執行失敗：{e}")
+            results.append({"id": t["id"], "correct": False, "error": str(e)})
+
+    return {
+        "trigger_rate": triggered / total if total > 0 else 0.0,
+        "triggered":    triggered,
+        "total":        total,
+        "results":      results,
+    }
+
+
 def run_citation_check() -> dict:
     """
     抽查來源引用率（報告中是否有頁碼標注）。
@@ -534,12 +635,14 @@ def main():
   hallucination  幻覺偵測率（5題，目標幻覺率 ≤ 5%）
   citation       來源引用率（抽查3題，目標 ≥ 90%）
   reflection     Self-Reflection 觸發率（目標 ≥ 30%）
+  outofcorpus    語料外主題 abstain/off-topic 觸發率（5題，目標 ≥ 90%）
   all            全部執行（預設）
         """,
     )
     parser.add_argument(
         "--type",
-        choices=["contradiction", "hallucination", "citation", "reflection", "all"],
+        choices=["contradiction", "hallucination", "citation", "reflection",
+                 "outofcorpus", "all"],
         default="all",
         help="執行哪種測試（預設 all）",
     )
@@ -635,6 +738,19 @@ def main():
         report["summary"]["self_reflection"] = {
             "rate": r["trigger_rate"],
             "pass": r["trigger_rate"] >= 0.3,
+        }
+
+    # ── F. 語料外主題 abstain / off-topic ────────────────────────────────────
+    if args.type in ("outofcorpus", "all"):
+        _print_separator("F. 語料外主題測試（5 題，spec 003 SC-004）")
+        r = run_out_of_corpus_tests(OUT_OF_CORPUS_TESTS)
+        report["results"]["out_of_corpus"] = r
+        print(f"\n🚧 結果：{r['triggered']}/{r['total']} 題正確觸發，"
+              f"觸發率 {r['trigger_rate']:.0%}")
+        print(f"   {_pass_fail(r['trigger_rate'] >= 0.9, '≥ 90%')}")
+        report["summary"]["out_of_corpus"] = {
+            "rate": r["trigger_rate"],
+            "pass": r["trigger_rate"] >= 0.9,
         }
 
     # ── 總結 ─────────────────────────────────────────────────────────────────

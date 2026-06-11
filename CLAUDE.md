@@ -45,7 +45,7 @@ python tests/benchmark.py --ragas                   # full RAGAS run (~$1 USD)
 - `tests/test_llm_client.py` — backend fallback, quota / 429 / 401 / 404 / 503 detection, friendly error messages
 - `tests/test_telemetry.py` — token / cost / latency registry, thread-safe accumulation, llm_client integration
 - `tests/test_ragas_eval.py` — RAGAS wrapper graceful-degradation paths
-- `tests/benchmark.py` — end-to-end agent assertions: contradiction accuracy ≥ 80%, hallucination ≤ 5%, citation ≥ 90%, self-reflection trigger ≥ 30%, promise tracking ≥ 75%; `--ragas` adds faithfulness / answer_relevancy / context_precision (LLM-as-judge via GPT-4o)
+- `tests/benchmark.py` — end-to-end agent assertions: contradiction accuracy ≥ 80%, hallucination ≤ 5%, citation ≥ 90%, self-reflection trigger ≥ 30%, promise tracking ≥ 75%, out-of-corpus abstain/off-topic trigger ≥ 90% (`--type outofcorpus`, spec 003 SC-004); `--ragas` adds faithfulness / answer_relevancy / context_precision (LLM-as-judge via GPT-4o)
 
 ## Architecture
 
@@ -137,7 +137,7 @@ Both layers are checked before enabling the run button. The longer of the two co
 
 ### Telemetry (`src/core/telemetry.py`)
 
-Every `chat()` call records prompt/completion tokens, duration, and an estimated USD cost (via the hardcoded 2026-05 pricing table in `_PRICING`) into a thread-safe singleton registry. Both successful and failed calls are recorded. The Streamlit sidebar polls `telemetry.summary()` and shows session totals; `benchmark.py` calls `telemetry.reset()` between questions to compute per-query token cost. The pricing table is intentionally static — when prices change, edit `_PRICING` directly.
+Every `chat()` call records prompt/completion tokens, duration, and an estimated USD cost (via the hardcoded 2026-05 pricing table in `_PRICING`) into a thread-safe singleton registry. Both successful and failed calls are recorded. The Streamlit sidebar polls `telemetry.summary()` and shows session totals; `benchmark.py` calls `telemetry.reset()` between questions to compute per-query token cost. The pricing table is intentionally static — when prices change, edit `_PRICING` directly. A unit test (`tests/test_telemetry.py::TestPricingCoverage`) gates that every `BACKEND_MODELS` entry has a `_PRICING` row, so swapping models without updating pricing fails the offline suite instead of silently zeroing the cost guard.
 
 ### RAGAS Evaluation (`src/core/ragas_eval.py`)
 
@@ -152,7 +152,7 @@ The wrapper degrades gracefully: missing package, missing API key, or empty cont
 
 ### BigQuery Client (`src/core/bq_client.py`)
 
-Singleton via `lru_cache`. Uses Application Default Credentials (ADC) — no explicit key needed when running on GCP (Cloud Run, Compute Engine). `GOOGLE_CLOUD_PROJECT` env var sets the project (fallback: `"earningswatch-demo"`). All modules must import via `get_bq_client()` — never instantiate `bigquery.Client` directly. Table path: `{project}.earnings_data.earnings_calls`.
+Singleton via `lru_cache`. Credentials resolve in two steps: if `st.secrets["gcp_service_account"]` exists (Streamlit Cloud — no ADC there), service-account credentials are built from it; otherwise Application Default Credentials (local dev, Cloud Run, Compute Engine). Project ID resolves as `GOOGLE_CLOUD_PROJECT` env → `project_id` inside the SA secret → `"earningswatch-demo"`, so the client and `get_table_path()` always agree. This is the one sanctioned core-layer soft-import of `streamlit` (guarded; degrades to ADC). All modules must import via `get_bq_client()` — never instantiate `bigquery.Client` directly. Table path: `{project}.earnings_data.earnings_calls`.
 
 ### Secrets Management (`src/core/secrets.py`)
 
@@ -161,6 +161,8 @@ Singleton via `lru_cache`. Uses Application Default Credentials (ADC) — no exp
 2. Otherwise → `os.environ` / `.env`
 
 `bridge_to_env(name)` fetches a key from Secret Manager and writes it to `os.environ`, used at startup in `app.py` for keys that LangChain reads directly from env (e.g. `LANGSMITH_API_KEY`).
+
+`bridge_streamlit_secrets_to_env()` mirrors top-level *string* secrets from `st.secrets` into `os.environ` (Streamlit Cloud never exposes secrets as env vars). Called once in `app.py` right after `load_dotenv`, before any `src.core` import. Never overwrites existing env vars; missing `secrets.toml` is a silent no-op; a malformed one prints a warning instead of crashing the boot. TOML tables and unquoted numbers are skipped — secrets must be quoted strings (see `.streamlit/secrets.toml.example`).
 
 ### Streamlit UI (`src/ui/app.py`)
 
@@ -214,6 +216,8 @@ LLAMA_CLOUD_API_KEY=...  # enables LlamaParse for table-heavy PDFs
 COVERAGE_MIN_SCORE=0.25  # coverage sweep cosine-similarity gate; non-float / out-of-range → fallback to 0.25 with warning
 LLM_HYDE_ENABLED=false   # set true to enable HyDE query expansion
 LLM_BUDGET_USD=0.50      # per-query LLM spend cap (USD)
+COHERE_MAX_RPM=10        # Cohere rerank sliding-window throttle (Trial key = 10); 0 disables; non-integer → fallback to 10 with warning
+LLM_REASONING_EFFORT=minimal  # reasoning_effort for gpt-5* models (prevents reasoning tokens starving output)
 ```
 
 ## PDF Ingestion Filename Conventions

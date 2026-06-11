@@ -124,7 +124,7 @@ The system must bound the cost and latency of contradiction analysis so a single
 - **FR-008**: System MUST verify each non-empty evidence quote against the source content of its quarter using (a) exact substring match, then (b) a sliding-window fuzzy match with similarity threshold ≥ 0.85.
 - **FR-009**: When a quote fails verification, system MUST clear the quote, set `verification_failed: True`, and reduce `confidence` by 0.2 (floored at 0.0).
 - **FR-010**: When a quote passes only by fuzzy match, system MUST mark `evidence_<key>_fuzzy: True` so the UI can render a soft-match indicator.
-- **FR-011**: System MUST skip verification for quotes shorter than the minimum quote length (too short to verify without false rejections).
+- **FR-011**: System MUST skip verification for quotes shorter than the minimum quote length (`_MIN_QUOTE_LEN=10` chars — too short to verify without false rejections).
 - **FR-012**: System MUST bound the source text used for fuzzy comparison to a fixed cap to keep verification time bounded regardless of caller input.
 
 **Boilerplate filtering**
@@ -154,6 +154,11 @@ The system must bound the cost and latency of contradiction analysis so a single
 
 - **FR-024**: `batch_detect` MUST return a list of `{quarter_a, quarter_b, analysis, sources_a, sources_b}` objects sorted by original pair order; `sources_*` MUST be deduplicated `{file, page}` records suitable for report citations.
 - **FR-025**: `detect_promises` MUST return only entries where the LLM reports `has_promise: true`; each entry MUST include `promise_quarter`, `followup_quarter`, `content`, `status` (one of 達標/未兌現/不明 with a leading status emoji), `detail`, and `confidence`.
+
+**Table-chunk deprioritization**
+
+- **FR-026**: Before slicing each quarter's chunks to `chunks_per_pair`, system MUST stably sort the chunks so that `payload.section == "table"` chunks come last (narrative chunks first, original score order preserved within each group). Stance comparison needs management's spoken narrative; balance-sheet/metric tables carry no stance and dilute the LLM signal.
+- **FR-027**: A quarter whose chunks are *all* tables MUST still be compared using those table chunks (degraded input beats an empty pair).
 
 ### Key Entities
 

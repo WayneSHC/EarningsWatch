@@ -134,6 +134,7 @@ The Streamlit UI exposes the available backends via `available_backends()` and l
 - **OpenAI parameter compat** — `_call_openai_compat` tries `max_completion_tokens` first; falls back to `max_tokens` on TypeError or specific API error messages, handling both legacy and new model API shapes.
 - **Cohere usage shape variants** — `_call_cohere` reads `meta.tokens.input_tokens` OR `meta.billed_units.input` to handle SDK version drift.
 - **Hung backend** — `_dispatch_with_timeout` enforces the per-call timeout via a future; the call surfaces as `TimeoutError`, classified as transient → retry → cascade.
+- **Reasoning-token starvation (GPT-5)** — reasoning models spend `max_completion_tokens` on both reasoning and output; at the default `reasoning_effort` a moderately complex prompt can exhaust the budget on reasoning and return an empty string (`finish_reason="length"`), which downstream `_extract_json` can only degrade on. Mitigated by `reasoning_effort="minimal"` (FR-031) — this project's prompts are structured JSON extraction/classification, which needs output budget, not deliberation.
 
 ## Requirements *(mandatory)*
 
@@ -190,6 +191,7 @@ The Streamlit UI exposes the available backends via `available_backends()` and l
 - **FR-026**: Every `_call_<backend>` MUST return `(text, prompt_tokens, completion_tokens)`. If the SDK does not expose usage metadata, the tuple's token counts MUST be 0 (recorded, not blocked).
 - **FR-027**: `_call_openai_compat` MUST try `max_completion_tokens` first and fall back to `max_tokens` on TypeError or message-pattern API errors — handling both legacy and new OpenAI model API shapes.
 - **FR-028**: `_call_cohere` MUST read usage from either `meta.tokens.*` (newer SDK) or `meta.billed_units.*` (older SDK).
+- **FR-031**: For `gpt-5*` models, `_call_openai_compat` MUST pass `reasoning_effort` (default `"minimal"`, overridable via `LLM_REASONING_EFFORT`) so reasoning tokens cannot consume the entire `max_completion_tokens` budget and yield an empty `message.content`. Non-reasoning models (e.g. `gpt-4o`) MUST NOT receive the parameter — they reject it with a 400.
 
 **Runtime backend control**
 
@@ -215,11 +217,12 @@ The Streamlit UI exposes the available backends via `available_backends()` and l
 - **SC-006**: A model name not in `_PRICING` produces a recorded call with `cost_usd=0.0` and contributes 0 to summary — but is still counted in `total_calls`.
 - **SC-007**: `chat("")` raises `ValueError` in **< 1 ms** (no LLM call made).
 - **SC-008**: Per-call timeout is enforced within `_DEFAULT_TIMEOUT_SEC + 5 s` upper bound, regardless of SDK behavior.
+- **SC-009**: Every `(backend, model)` pair in `BACKEND_MODELS` has a `_PRICING` entry — enforced by the offline unit test `tests/test_telemetry.py::TestPricingCoverage`, so a model swap cannot silently zero the cost guard.
 
 ## Assumptions
 
 - The four supported provider SDKs (`openai`, `google.genai`, `anthropic`, `cohere`) are installed and importable in the deployment environment; missing SDKs MUST raise `ImportError` at dispatch time rather than silent failure.
-- The `_PRICING` table values are point-in-time estimates (2026-05). Cost figures are usable for relative comparison and budget enforcement; absolute accuracy requires periodic re-calibration against provider pricing pages.
+- The `_PRICING` table values are point-in-time estimates (2026-05). Cost figures are usable for relative comparison and budget enforcement; absolute accuracy requires periodic re-calibration against provider pricing pages. **Quality gate**: any PR that changes `BACKEND_MODELS` MUST keep `_PRICING` in sync — enforced mechanically by SC-009's unit test (a missing entry fails the offline suite, not just review).
 - The auto-detect order (`gemini → openai → anthropic → cohere`) reflects current cost preference (free tier first); reordering is a configuration change, not a code change.
 - `LLM_INJECTION_GUARD` defaults to on; tests that need the raw prompt can flip it off — but production MUST keep it on.
 - `_LLM_TIMEOUT_POOL` is a process-wide singleton with `atexit` shutdown; this assumes the process exits cleanly (Streamlit normally does).

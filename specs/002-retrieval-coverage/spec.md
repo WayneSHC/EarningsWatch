@@ -8,8 +8,6 @@
 
 **Input**: User description: "As-built spec for the Retrieval and Coverage Sweep subsystem of EarningsWatch — vector search, Cohere rerank, HyDE query expansion, per-quarter coverage sweep with score gate, and safe env-driven configuration."
 
-> **Documentation drift flagged**: `CLAUDE.md` and `.specify/memory/constitution.md` describe the vector DB as Qdrant. The actual `src/core/retriever.py` uses **BigQuery Vector Search** (`VECTOR_SEARCH(TABLE …, 'embedding', …, distance_type => 'COSINE')`) with Cohere rerank. The CLAUDE.md text needs an update; this spec describes what the code actually does today.
-
 ## User Scenarios & Testing *(mandatory)*
 
 ### User Story 1 — Retrieve and rank topic-relevant chunks (Priority: P1)
@@ -149,6 +147,11 @@ When the user provides company/quarter/section filters, those filters MUST be ap
 **Company quarter listing**
 
 - **FR-022**: `get_company_quarters` MUST return the distinct, sorted list of quarters present for the given company in the configured table, with `NULL` quarters excluded.
+
+**Rerank throttling**
+
+- **FR-023**: Every Cohere rerank call MUST first acquire a slot from a thread-safe sliding-window rate limiter (60-second window, `COHERE_MAX_RPM` calls per window, default 10 — matching Cohere Trial-key limits). When the window is full, the call MUST block until the oldest call ages out, not fail — so burst workloads (benchmark, multi-company parallel runs) queue instead of triggering 429s that collapse rerank quality.
+- **FR-024**: `COHERE_MAX_RPM=0` MUST disable throttling entirely (production keys with higher limits). A non-integer value MUST fall back to the default 10 with a logged warning identifying the bad input (same safe-config pattern as FR-016); a negative value falls back to 10 silently.
 
 ### Key Entities
 
