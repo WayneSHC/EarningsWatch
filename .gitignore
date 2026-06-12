@@ -1,7 +1,10 @@
 # ══ 機密資料（絕對不進 git）══
 .env
 *.env.local
-.streamlit/secrets.toml   # Streamlit Cloud 密鑰（config.toml 可以進 git）
+# Streamlit Cloud 密鑰與 GCP SA 金鑰（config.toml 可以進 git）
+# 注意：gitignore 不支援行尾註解，註解必須獨立成行
+.streamlit/secrets.toml
+.streamlit/sa-key.json
 
 # ══ Python ══
 __pycache__/
