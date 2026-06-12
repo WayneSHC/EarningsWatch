@@ -19,6 +19,32 @@ import streamlit as st
 from src.ui.cache import sanitize_str as _sanitize_str
 from src.ui.cache import cache_key
 from src.ui.state import UIState
+from src.ui import insights
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _quarterly_closes(ticker: str, quarters: tuple[str, ...]) -> dict[str, float]:
+    """
+    [c] 季末收盤價（快取 1 小時）：每季取 quarter_end_date 當日或之前最後一個
+    交易日的收盤。任何失敗回空 dict —— 股價疊圖是加值資訊，絕不擋趨勢圖渲染。
+    """
+    try:
+        import yfinance as yf
+        hist = yf.Ticker(ticker).history(period="6y")["Close"]
+        if hist.empty:
+            return {}
+        hist.index = hist.index.tz_localize(None)
+        out: dict[str, float] = {}
+        for q in quarters:
+            end = insights.quarter_end_date(q)
+            if not end:
+                continue
+            sub = hist.loc[:end]
+            if not sub.empty:
+                out[q] = float(sub.iloc[-1])
+        return out
+    except Exception:
+        return {}
 
 
 def render_single_company_result(ui: UIState) -> None:
@@ -34,14 +60,22 @@ def render_single_company_result(ui: UIState) -> None:
     if _meta.get("auto_detected_topic") and _topic:
         st.info(
             f"🎯 已自動推導主題：**{_topic}** "
-            f"（如不正確，請在側欄改選主題後重新偵查）"
+            f"（如不正確，請在側欄改選主題後重新分析）"
         )
+
+    # ── [UX-3] 資料新鮮度：金融使用者看任何分析的第一眼是「as of」──────────
+    _as_of = None
+    try:
+        from src.ui.quarters import get_available_quarters
+        _as_of = insights.latest_quarter(get_available_quarters(_company))
+    except Exception:
+        pass  # [b] BQ 不可用時不擋結果渲染，僅略過 banner
+    if _as_of:
+        st.caption(f"🗓️ **資料截至：{_sanitize_str(_company)} {_sanitize_str(_as_of)} 法說會**　（語料庫最新一季）")
 
     st.divider()
 
-    # 信心度指標
     confidence = result.get("confidence", 0.0)
-    col1, col2, col3, col4 = st.columns(4)
     contradictions = result.get("contradictions", [])
     promises = result.get("promises", [])
 
@@ -55,10 +89,41 @@ def render_single_company_result(ui: UIState) -> None:
         and not c.get("analysis", {}).get("has_contradiction")
     )
 
+    # ── [UX-2] 裁決句：結論先於遙測 —— 語氣方向、最重大發現、管理層信用 ─────
+    from src.ui.chart import build_stance_series
+    _series = build_stance_series(contradictions)
+    _verdict = insights.build_verdict(_series, contradictions, promises)
+    _ps = insights.promise_stats(promises)
+
+    _v_rows = [
+        f"<strong>語氣軌跡</strong>：{_sanitize_str(_verdict['tone']['label'])}"
+    ]
+    if _verdict.get("top_finding"):
+        _v_rows.append(f"<strong>最重大發現</strong>：{_sanitize_str(_verdict['top_finding'])}")
+    _v_rows.append(f"<strong>管理層信用</strong>：{_sanitize_str(_verdict['promise_line'])}")
+    st.markdown(
+        '<div style="background:#fffbeb;border-left:4px solid #d97706;'
+        'padding:12px 16px;border-radius:4px;margin-bottom:8px;line-height:1.9">'
+        + "<br>".join(_v_rows) + "</div>",
+        unsafe_allow_html=True,
+    )
+
+    # ── [UX-1] 指標卡：方向優先，模型信心度移往「分析過程」tab ──────────────
+    col1, col2, col3, col4 = st.columns(4)
+    _traj = _verdict["tone"]
     with col1:
-        st.metric("分析信心度", f"{confidence:.0%}")
+        st.metric(
+            "語氣軌跡",
+            f"{_traj['arrow']} {_traj['direction']}",
+            delta=(f"連續 {_traj['streak']} 季" if _traj["streak"] >= 2 else None),
+            delta_color="off",
+        )
     with col2:
-        st.metric("跨季比對組數", f"{len(contradictions)} 組")
+        st.metric(
+            "明確矛盾",
+            f"{contradiction_count} 處",
+            delta="⚠ 需關注" if contradiction_count > 0 else None,
+        )
     with col3:
         st.metric(
             "立場轉變",
@@ -67,9 +132,12 @@ def render_single_company_result(ui: UIState) -> None:
         )
     with col4:
         st.metric(
-            "明確矛盾",
-            f"{contradiction_count} 處",
-            delta="⚠ 需關注" if contradiction_count > 0 else None,
+            "承諾兌現率",
+            f"{_ps['rate']:.0%}" if _ps["rate"] is not None else "—",
+            delta=(f"{_ps['fulfilled']}達標 / {_ps['missed']}未兌現"
+                   if (_ps["fulfilled"] + _ps["missed"]) > 0 else None),
+            delta_color="off",
+            help="達標 ÷（達標＋未兌現）；「不明」不入分母",
         )
 
     st.divider()
@@ -84,20 +152,9 @@ def render_single_company_result(ui: UIState) -> None:
     _sub_qs       = result.get("sub_queries", [])
     _node_timings = result.get("node_timings", {})
 
-    # ── Item 2：Self-Reflection 徽章 ──────────────────────────────────────────
+    # ── Item 3：工具啟用卡片（[UX-1] 與 Self-Reflection 徽章一併移至
+    #     「分析過程」tab 渲染 —— 系統遙測不佔決策版面）────────────────────────
     _retry_count = max(0, _iteration - 1)
-    if _retry_count > 0:
-        st.info(
-            f"🔄 **Self-Reflection 觸發**：Agent 自動重查 **{_retry_count} 次** 後達標 "
-            f"→ 最終信心度 **{confidence:.0%}**　（代表初次檢索品質不足，系統自動擴展搜尋）",
-        )
-    else:
-        st.success(
-            f"✅ **Agent 一次達標** — 信心度 **{confidence:.0%}**，"
-            f"Self-Reflection 評估無需重查"
-        )
-
-    # ── Item 3：工具啟用卡片 ──────────────────────────────────────────────────
     _q_count     = len(_retrieved_r)
     _chunk_count = sum(len(v) for v in _retrieved_r.values())
     _badges_html = [
@@ -127,12 +184,6 @@ def render_single_company_result(ui: UIState) -> None:
             f'<span style="background:#ede9fe;border-radius:5px;padding:4px 11px;margin:2px 3px;'
             f'display:inline-block;font-size:13px">🔍 Coverage Sweep · 補充 {_n_cov} 季</span>'
         )
-    st.markdown(
-        "<div style='margin-bottom:4px'><strong>🤖 Agent 工具使用</strong>　"
-        + "".join(_badges_html) + "</div>",
-        unsafe_allow_html=True,
-    )
-    st.divider()
 
     # Tab 切換不同分析面向
     tab_report, tab_contradiction, tab_promise, tab_trend, tab_agent = st.tabs(
@@ -145,23 +196,16 @@ def render_single_company_result(ui: UIState) -> None:
         #     PDF 匯出仍用原始 final_report（fpdf2 不處理 markdown），不受影響。
         final_report = result.get("final_report", "（報告生成中...）").replace("$", r"\$")
 
-        # ── D5：建議追問摘要框（取有效立場變化的 follow_up，最多 3 條）────────
-        _follow_ups = [
-            a.get("follow_up_question", "").strip()
-            for c in contradictions
-            for a in [c.get("analysis", {})]
-            if a.get("follow_up_question", "").strip()
-            and a.get("stance_change") not in ("無關", "維持不變", None)
-        ]
-        # 去重、保序
-        _seen: set[str] = set()
-        _unique_fqs: list[str] = []
-        for _fq in _follow_ups:
-            if _fq not in _seen:
-                _seen.add(_fq)
-                _unique_fqs.append(_fq)
-        if _unique_fqs:
-            _top3 = _unique_fqs[:3]
+        # ── [UX-11] 晨會摘要：三行純文字，st.code 右上角自帶複製按鈕 ──────────
+        with st.expander("📋 晨會摘要（點程式碼框右上角複製）", expanded=False):
+            st.code(
+                insights.morning_note(_company, _topic, _as_of, _verdict),
+                language=None,
+            )
+
+        # ── D5：建議追問摘要框（[UX-5] 改按重大性排序，取前 3 條）─────────────
+        _top3 = insights.top_follow_ups(contradictions, n=3)
+        if _top3:
             _fq_items = "".join(
                 f'<li style="margin:4px 0">{html.escape(q)}</li>'
                 for q in _top3
@@ -206,8 +250,10 @@ def render_single_company_result(ui: UIState) -> None:
             else:
                 if irrelevant_count > 0:
                     st.caption(f"已隱藏 {irrelevant_count} 組無效比對（主題無關 / 表格頁 / boilerplate）")
+                st.caption("排序：重大性 × 信心度（財測指引 / 毛利率 > 資本支出 > 需求・庫存・產能 > 一般敘述）")
 
-                for c in relevant:
+                # [UX-5] 毛利指引收回 ≠ 庫存措辭微調：按重大性排序而非季度配對順序
+                for c in insights.sort_by_materiality(relevant):
                     a = c.get("analysis", {})
                     is_contradiction = a.get("has_contradiction", False)
                     card_class = "contradiction-card" if is_contradiction else "ok-card"
@@ -228,14 +274,43 @@ def render_single_company_result(ui: UIState) -> None:
                         f'　<span style="font-size:12px;opacity:0.65">信心度 {_conf_val:.0%}</span>'
                         if isinstance(_conf_val, (int, float)) else ""
                     )
+                    # [UX-5] 主題重大性標籤
+                    _, _tag = insights.materiality_of(a)
+                    _tag_chip = (
+                        f'<span style="background:#fee2e2;border-radius:4px;padding:1px 8px;'
+                        f'font-size:12px;margin-left:6px">{html.escape(_tag)}</span>'
+                        if _tag != "一般敘述" else ""
+                    )
+
+                    # [UX-8] 引文驗證狀態：逐字 / 近似（合規等級的差異，資料原本就有）
+                    def _quote_badge(fuzzy_key: str, quote: str) -> str:
+                        if not quote:
+                            return ""
+                        label, bg = (
+                            ("近似", "#fef3c7") if a.get(fuzzy_key) else ("逐字", "#d1fae5")
+                        )
+                        return (
+                            f'<span style="background:{bg};border-radius:3px;'
+                            f'padding:0 5px;font-size:11px;opacity:0.85">{label}</span>'
+                        )
+
+                    _ev_block = (
+                        f'<em>「{ev_early}」</em>{_quote_badge("evidence_early_fuzzy", ev_early)}'
+                        f' → <em>「{ev_later}」</em>{_quote_badge("evidence_later_fuzzy", ev_later)}'
+                    )
+                    if a.get("verification_failed") and not (ev_early or ev_later):
+                        _ev_block = (
+                            '<span style="opacity:0.7">（引文未通過原文驗證，已自動移除 — '
+                            '信心度已對應下調）</span>'
+                        )
 
                     st.markdown(f"""
 <div class="{card_class}">
-<strong>{icon} {q_a} vs {q_b}</strong>{_conf_str}<br>
+<strong>{icon} {q_a} vs {q_b}</strong>{_tag_chip}{_conf_str}<br>
 立場變化：<strong>{stance}</strong><br>
 {detail}<br>
 <br>
-<em>「{ev_early}」</em> → <em>「{ev_later}」</em><br>
+{_ev_block}<br>
 <br>
 💡 <strong>建議追問</strong>：{follow_up}
 </div>
@@ -285,15 +360,38 @@ def render_single_company_result(ui: UIState) -> None:
                 horizontal=True,
                 key="single_chart_mode",
             )
+
+            # ── [UX-4] 股價疊圖：語氣領先股價 = 訊號；落後 = 追認 ──────────
+            _price_map = None
+            if mode == "累積分數":
+                from src.agent.tools import STOCK_CODE_MAP
+                _ticker = STOCK_CODE_MAP.get(_c, "")
+                if _ticker:
+                    _closes = _quarterly_closes(
+                        _ticker, tuple(e["quarter"] for e in s)
+                    )
+                    _idx = insights.index_prices(_closes)
+                    if len(_idx) >= 2:
+                        _price_map = {_c: _idx}
+
             fig = render_trend_chart(
                 {_c: s}, _t,
                 mode="cumulative" if mode == "累積分數" else "delta",
+                price_by_company=_price_map,
             )
             components.html(chart_to_scrollable_html(fig), height=420, scrolling=False)
             st.caption(
                 "累積分數：每季立場（更樂觀 +1 / 維持不變 0 / 更保守 −1）的累積加總。"
                 "正值代表整體樂觀偏移，負值代表趨向保守。"
                 "　淺灰 bar / 空心圓 = 此季度法說會未提及此主題。"
+                + ("　虛線 = 同期股價（期初 = 100，右軸）。" if _price_map else "")
+                + " ⚠ 語氣分數屬方向性指標（diffusion index 性質），"
+                  "分值本身無基本面意義，請勿作水準值比較。"
+            )
+            # [UX-7] 區分「公司特有 vs 產業共性」是基本面分析的第一刀
+            st.caption(
+                "💡 想判斷此語氣轉變是公司特有還是產業共性？"
+                "開啟側欄「🌐 多公司比較模式」看同業同主題對照。"
             )
 
             # ── 季度覆蓋摘要 ──────────────────────────────────────────
@@ -338,6 +436,31 @@ def render_single_company_result(ui: UIState) -> None:
             "此頁面揭示 EarningsWatch RAG Agent 的內部運作："
             "Query 拆解 → 工具路由 → 並行檢索 → 矛盾偵測 → Self-Reflection → 報告生成"
         )
+
+        # ── [UX-1] 系統遙測集中於此：模型信心度 + Self-Reflection + 工具卡片 ──
+        _t_col1, _t_col2 = st.columns([1, 3])
+        with _t_col1:
+            st.metric(
+                "模型分析信心度", f"{confidence:.0%}",
+                help="Self-Reflection 節點對檢索品質與比對結果的自我評分（系統遙測，非投資指標）",
+            )
+        with _t_col2:
+            if _retry_count > 0:
+                st.info(
+                    f"🔄 **Self-Reflection 觸發**：Agent 自動重查 **{_retry_count} 次** 後達標 "
+                    f"→ 最終信心度 **{confidence:.0%}**　（代表初次檢索品質不足，系統自動擴展搜尋）",
+                )
+            else:
+                st.success(
+                    f"✅ **Agent 一次達標** — 信心度 **{confidence:.0%}**，"
+                    f"Self-Reflection 評估無需重查"
+                )
+        st.markdown(
+            "<div style='margin-bottom:4px'><strong>🤖 Agent 工具使用</strong>　"
+            + "".join(_badges_html) + "</div>",
+            unsafe_allow_html=True,
+        )
+        st.divider()
 
         # ── Item 5：Sub-query 拆解 ─────────────────────────────────────
         if _sub_qs:

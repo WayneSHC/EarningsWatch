@@ -106,12 +106,16 @@ def render_trend_chart(
     series_by_company: dict[str, list[dict]],
     topic: str,
     mode: str = "cumulative",
+    price_by_company: dict[str, dict[str, float]] | None = None,
 ) -> go.Figure:
     """
     Args:
         series_by_company: {"台積電": [...], "聯發科": [...]}
         topic: 主題名稱（顯示在圖標題）
         mode: "cumulative"（累積折線）或 "delta"（逐季 bar）
+        price_by_company: {"台積電": {"2024Q1": 100.0, ...}} 指數化季末收盤
+            （最早季 = 100），有值時於右軸疊上股價虛線 —— 語氣領先或落後
+            價格，一眼可辨。只在 cumulative 模式繪製。
 
     Returns:
         plotly Figure，供 st.plotly_chart() 使用
@@ -206,6 +210,31 @@ def render_trend_chart(
                 customdata=hover_labels,
             ))
 
+    # ── 股價疊圖（右軸，僅 cumulative 模式）────────────────────────────────
+    has_price = False
+    if mode == "cumulative" and price_by_company:
+        for i, (company, quarter_prices) in enumerate(price_by_company.items()):
+            pts = [(q, p) for q, p in sorted(
+                quarter_prices.items(), key=lambda kv: _quarter_sort_key(kv[0])
+            ) if q in set(all_quarters)]
+            if len(pts) < 2:
+                continue
+            has_price = True
+            color = COMPANY_COLORS[i % len(COMPANY_COLORS)]
+            fig.add_trace(go.Scatter(
+                x=[q for q, _ in pts],
+                y=[p for _, p in pts],
+                mode="lines",
+                name=f"{company} 股價（指數化）",
+                line=dict(color=color, width=1.5, dash="dot"),
+                yaxis="y2",
+                opacity=0.65,
+                hovertemplate=(
+                    "<b>%{x}</b><br>股價指數：%{y:.1f}（期初=100）"
+                    f"<extra>{company}</extra>"
+                ),
+            ))
+
     # 零基線
     fig.add_hline(y=0, line_dash="dash", line_color="#bbb", line_width=1)
 
@@ -239,6 +268,14 @@ def render_trend_chart(
         showgrid=True, gridcolor="#f0f0f0",
         tickmode="linear", dtick=1, zeroline=False,
     )
+    if has_price:
+        fig.update_layout(
+            yaxis2=dict(
+                title="股價（期初=100）",
+                overlaying="y", side="right",
+                showgrid=False, zeroline=False,
+            ),
+        )
 
     return fig
 

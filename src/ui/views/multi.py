@@ -34,20 +34,35 @@ def render_multi_company_result(ui: UIState) -> None:
     st.success("✅ 分析完成")
     st.divider()
 
-    # ── 比較指標列 ────────────────────────────────────────────────────
+    # ── 比較指標列（[UX-6] 管理層信用記分卡：你交易的是管理層，不是公司）──
+    from src.ui import insights
+    from src.ui.chart import build_stance_series as _bss
+
     metric_cols = st.columns(len(_companies))
     for i, cname in enumerate(_companies):
         r = multi_results.get(cname, {})
-        conf = r.get("confidence", 0.0)
-        n_cont = len(r.get("contradictions", []))
         n_shift = sum(
             1 for c in r.get("contradictions", [])
             if c.get("analysis", {}).get("stance_change") not in ("維持不變", "無關", None)
         )
+        _traj = insights.summarize_trajectory(_bss(r.get("contradictions", [])))
+        _ps = insights.promise_stats(r.get("promises", []))
         with metric_cols[i]:
             st.markdown(f"### {cname}")
-            st.metric("信心度", f"{conf:.0%}")
-            st.metric("跨季組數", f"{n_cont} 組")
+            st.metric(
+                "語氣軌跡",
+                f"{_traj['arrow']} {_traj['direction']}",
+                delta=(f"連續 {_traj['streak']} 季" if _traj["streak"] >= 2 else None),
+                delta_color="off",
+            )
+            st.metric(
+                "承諾兌現率",
+                f"{_ps['rate']:.0%}" if _ps["rate"] is not None else "—",
+                delta=(f"{_ps['fulfilled']}達標 / {_ps['missed']}未兌現"
+                       if (_ps["fulfilled"] + _ps["missed"]) > 0 else None),
+                delta_color="off",
+                help="達標 ÷（達標＋未兌現）；「不明」不入分母。跨公司可比的管理層信用分數。",
+            )
             st.metric("立場轉變", f"{n_shift} 處")
 
     st.divider()

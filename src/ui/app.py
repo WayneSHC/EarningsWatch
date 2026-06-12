@@ -173,7 +173,8 @@ with st.sidebar:
 
 # ── 主區域 ───────────────────────────────────────────────────────────────────
 st.title("🕵️ EarningsWatch")
-st.markdown("**法說會 RAG Agent 一致性審計平台** — 追蹤管理層跨季發言，找矛盾・追承諾・抓話術")
+# [UX-10] 對外措辭中性化：報告與標題是會被轉發的載體，避免「抓話術」式用語
+st.markdown("**法說會跨季一致性分析平台** — 立場轉變・承諾兌現・語氣軌跡追蹤")
 st.divider()
 
 # ── [f] Rate Limiting：雙層防護 ──────────────────────────────────────────────
@@ -197,13 +198,15 @@ _not_enough_companies = compare_mode and len(selected_companies) < 2
 col_btn, col_info = st.columns([1, 3])
 with col_btn:
     run_btn = st.button(
-        "🔍 開始偵查" if cooldown_remaining == 0 else f"⏳ 請稍候 {cooldown_remaining:.0f}s",
+        "🔍 開始分析" if cooldown_remaining == 0 else f"⏳ 請稍候 {cooldown_remaining:.0f}s",
         type="primary",
         use_container_width=True,
         disabled=cooldown_remaining > 0 or _not_enough_companies,
         # help tooltip：懸停時顯示按鈕功能說明，降低使用者疑惑
-        help="啟動 AI Agent，對所選公司進行跨季法說會發言矛盾分析、承諾追蹤與矛盾偵測",
+        help="啟動 AI Agent，對所選公司進行跨季法說會發言一致性分析與承諾追蹤",
     )
+    # [UX-11] 預先講清楚耗時，否則首次使用者會在第 15 秒關掉分頁
+    st.caption("⏱ 完整分析約需 60–90 秒，過程即時顯示")
 with col_info:
     companies_label = " + ".join(selected_companies) if compare_mode else company
     _topic_label = topic if topic else "由問題自動推導"
