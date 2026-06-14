@@ -25,5 +25,5 @@ fileWatcherType = "none"
 gatherUsageStats = false
 
 [client]
-# 顯示工具列（方便 Demo）
-toolbarMode = "auto"
+# 公開 Demo：viewer 模式隱藏開發者選項（不顯示 GitHub source / 重跑等開發工具）
+toolbarMode = "viewer"
