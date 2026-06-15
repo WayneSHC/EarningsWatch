@@ -1,5 +1,7 @@
 # GCP Cloud Run 部署指南
 
+> ⚠️ **狀態：選擇性 / 目前未啟用。** 原 Cloud Run 服務 `earningswatch`（asia-east1）已於 2026-06 下線以節省成本，現行線上部署改用 Streamlit Community Cloud（見 [README 雲端部署](../README.md#-雲端部署)）。本指南保留作為重新部署到 Cloud Run 的完整食譜。
+
 把 EarningsWatch（Streamlit + LangGraph Agent）部署到 GCP Cloud Run，
 Vector DB 走 BigQuery Vector Search（Serverless），密鑰用 Secret Manager 管理。
 

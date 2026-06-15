@@ -149,16 +149,10 @@ python scripts/run_ingestion.py --pdf TSMC\ 2Q24\ Transcript.pdf  # 單一檔案
 
 ## ☁️ 雲端部署
 
-**首選：GCP Cloud Run**（同 GCP 內走 BigQuery + Vertex AI 最順）
+> 📍 **目前線上部署：Streamlit Community Cloud**（前端），後端 BigQuery 資料集 `earningswatch-demo.earnings_data.earnings_calls` 仍在運作。
+> 原 GCP Cloud Run 服務已於 2026-06 下線以節省成本；下方 Cloud Run 設定與 [docs/DEPLOY_GCP.md](docs/DEPLOY_GCP.md) 保留作為「選擇性重新部署」的食譜，`Dockerfile` 同理保留。
 
-```bash
-# 詳見 docs/DEPLOY_GCP.md
-gcloud run deploy earningswatch --source . --region asia-east1
-```
-
-Cloud Run Service Account 需要 `BigQuery Data Editor`、`AI Platform User`、`Secret Manager Secret Accessor` 三個角色。完整流程（含 `setup_gcp_secrets.sh` 一鍵建立 Secret Manager 條目、`rotate_secret.sh` 輪換金鑰）請參考 [docs/DEPLOY_GCP.md](docs/DEPLOY_GCP.md)。
-
-**次選：Streamlit Cloud**
+**現行：Streamlit Cloud**
 
 1. Fork 此 repo
 2. 在 Streamlit Cloud 連結 GitHub repo
@@ -171,7 +165,16 @@ GEMINI_API_KEY = "你的金鑰"
 APP_PASSWORD = "設定存取密碼"
 ```
 
-> ⚠️ Streamlit Cloud 仍需 BigQuery + Vertex AI 認證，請將 service-account JSON 放進 Streamlit secrets 並設定 `GOOGLE_APPLICATION_CREDENTIALS`。
+> ⚠️ Streamlit Cloud 仍需 BigQuery + Vertex AI 認證，請將 service-account JSON 放進 Streamlit secrets 的 `[gcp_service_account]` 區塊（Streamlit Cloud 無 ADC）。此 SA 金鑰即目前唯一常駐的後端憑證，退役時記得一併撤銷。
+
+**選擇性：GCP Cloud Run**（同 GCP 內走 BigQuery + Vertex AI 最順，需重新部署）
+
+```bash
+# 詳見 docs/DEPLOY_GCP.md
+gcloud run deploy earningswatch --source . --region asia-east1
+```
+
+Cloud Run Service Account 需要 `BigQuery Data Editor`、`AI Platform User`、`Secret Manager Secret Accessor` 三個角色。完整流程（含 `setup_gcp_secrets.sh` 一鍵建立 Secret Manager 條目、`rotate_secret.sh` 輪換金鑰）請參考 [docs/DEPLOY_GCP.md](docs/DEPLOY_GCP.md)。
 
 ---
 
@@ -194,14 +197,14 @@ EarningsWatch/
 ├── tests/
 │   └── benchmark.py            # 30 題量化 Benchmark
 ├── docs/
-│   ├── DEPLOY_GCP.md           # GCP Cloud Run 部署流程
+│   ├── DEPLOY_GCP.md           # GCP Cloud Run 部署流程（選擇性；目前未啟用）
 │   ├── PROJECT_OVERVIEW.md     # 30 分鐘 onboarding
 │   ├── ROADMAP.md              # 技術債 / 待辦
 │   └── system_architecture.md  # 系統架構
 ├── .streamlit/
 │   └── config.toml             # Streamlit 安全設定
 ├── .env.example                # 環境變數範本
-├── Dockerfile                  # Cloud Run 用 image
+├── Dockerfile                  # Cloud Run 用 image（選擇性重新部署時使用）
 ├── requirements.txt
 └── start.sh                    # 本機啟動 Streamlit（資料庫已 Serverless 化）
 ```
