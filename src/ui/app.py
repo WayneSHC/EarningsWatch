@@ -120,7 +120,6 @@ with st.sidebar:
     if ui.quarters_loaded_key != _quarters_key:
         # 選擇剛改變：本輪畫 disabled 佔位 → 暖快取 → rerun，下一輪才開放選取
         st.multiselect("季度範圍（載入中…）", [], default=[], disabled=True)
-        st.caption("⏳ 正在更新可選季度…")
         with st.spinner("更新可選季度…"):
             _load_quarters()
         ui.quarters_loaded_key = _quarters_key
