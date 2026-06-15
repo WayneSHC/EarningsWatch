@@ -138,6 +138,14 @@ hr {
     border-radius: 8px !important;
 }
 
+/* [UX] 隱藏右上角「Running… / Stop」狀態小工具。
+   切換下拉等操作都會觸發 Streamlit 整頁 rerun，預設會閃出 Stop 按鈕，
+   對公開 demo 的觀眾像是「當機」。真正的分析已有頁內 spinner
+   （「AI Agent 分析中…」）+ 即時步驟 log 提供回饋，故可安全隱藏此小工具。 */
+[data-testid="stStatusWidget"] {
+    display: none !important;
+}
+
 /* ───────────────────────── RWD：mobile (≤768px) ─────────────────────────
    Streamlit 在窄螢幕下不一定會自動把 st.columns 堆疊，且 metric / tab /
    卡片字級在手機上偏大。下面用媒體查詢強制堆疊欄位、縮字、橫向捲動 tab，

@@ -105,16 +105,21 @@ with st.sidebar:
     topic = "" if topic_choice == _TOPIC_AUTO else topic_choice
     # [b] 下拉只顯示「所選公司實際已匯入」的季度，避免使用者選到「下拉有但
     # 該公司沒資料」的季度，導致檢索 0 chunk 走入 off-topic 分支
-    if compare_mode:
-        available_quarters = get_available_quarters_union(tuple(selected_companies))
-    else:
-        available_quarters = get_available_quarters(company)
+    # [UX] 切換公司會觸發 Streamlit 整頁 rerun 來刷新季度下拉；用具名 spinner
+    #      讓這個（cache miss 時的）BigQuery 查詢看起來是「刻意更新」而非卡住。
+    with st.spinner("更新可選季度…"):
+        if compare_mode:
+            available_quarters = get_available_quarters_union(tuple(selected_companies))
+        else:
+            available_quarters = get_available_quarters(company)
     quarter_selection = st.multiselect(
         f"季度範圍（留空 = 全部，共 {len(available_quarters)} 季）",
         available_quarters,
         default=[],
     )
     quarters = quarter_selection if quarter_selection else []
+    # [UX] 提示：切換選項會自動 rerun，屬正常現象，避免使用者誤判為當機 / bug。
+    st.caption("💡 切換公司／主題時頁面會自動重新整理（約 1 秒），屬正常現象，非錯誤。")
 
     custom_query = st.text_area(
         "自訂問題（選填）",
