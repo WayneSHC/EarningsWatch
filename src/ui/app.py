@@ -105,13 +105,28 @@ with st.sidebar:
     topic = "" if topic_choice == _TOPIC_AUTO else topic_choice
     # [b] 下拉只顯示「所選公司實際已匯入」的季度，避免使用者選到「下拉有但
     # 該公司沒資料」的季度，導致檢索 0 chunk 走入 off-topic 分支
-    # [UX] 切換公司會觸發 Streamlit 整頁 rerun 來刷新季度下拉；用具名 spinner
-    #      讓這個（cache miss 時的）BigQuery 查詢看起來是「刻意更新」而非卡住。
-    with st.spinner("更新可選季度…"):
+    # [UX] 切換公司會觸發 Streamlit 整頁 rerun 來刷新季度下拉。Streamlit 是單次
+    #      由上而下執行：cache miss 時 BigQuery 查詢會「阻塞」在這裡，但此時下方
+    #      st.multiselect 尚未執行，畫面上殘留的是「上一輪」的舊下拉且仍可點選，
+    #      看起來像當機。解法：偵測到公司組合改變時走兩段式渲染——先畫一個
+    #      disabled 佔位下拉、暖快取後 st.rerun()，下一輪 cache hit 才畫真正可選的。
+    _quarters_key = tuple(selected_companies) if compare_mode else (company,)
+
+    def _load_quarters() -> list[str]:
         if compare_mode:
-            available_quarters = get_available_quarters_union(tuple(selected_companies))
-        else:
-            available_quarters = get_available_quarters(company)
+            return get_available_quarters_union(tuple(selected_companies))
+        return get_available_quarters(company)
+
+    if ui.quarters_loaded_key != _quarters_key:
+        # 選擇剛改變：本輪畫 disabled 佔位 → 暖快取 → rerun，下一輪才開放選取
+        st.multiselect("季度範圍（載入中…）", [], default=[], disabled=True)
+        st.caption("⏳ 正在更新可選季度…")
+        with st.spinner("更新可選季度…"):
+            _load_quarters()
+        ui.quarters_loaded_key = _quarters_key
+        st.rerun()
+
+    available_quarters = _load_quarters()  # cache hit → 即時
     quarter_selection = st.multiselect(
         f"季度範圍（留空 = 全部，共 {len(available_quarters)} 季）",
         available_quarters,

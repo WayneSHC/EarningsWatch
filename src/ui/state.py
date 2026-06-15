@@ -41,6 +41,12 @@ class UIState:
     # ── cooldown ──
     last_run_time: float = 0.0
 
+    # ── 季度下拉的「載入中」兩段式渲染狀態 ──
+    # 記錄上次已成功載入季度的公司組合 key；當使用者切換公司導致 key 改變時，
+    # 先畫一個 disabled 佔位下拉 + 暖快取後 st.rerun()，下一輪再畫真正可選的下拉，
+    # 避免 cache miss 期間舊下拉殘留且仍可點選（看起來像當機）。
+    quarters_loaded_key: tuple | None = None
+
     # ── 結果分派 ──
     mode: Literal["single", "multi"] | None = None
 
