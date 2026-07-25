@@ -1,6 +1,7 @@
 """
 tests/benchmark.py
-35 題 Benchmark 測試集 — 量化驗證六項核心指標
+30 題 Benchmark 測試集 — 量化驗證六項核心指標
+（20 矛盾 + 5 幻覺 + 5 語料外；引用率與 Self-Reflection 觸發率由既有 run 抽查統計）
 
 測試類型：
   A. 矛盾偵測正確率（目標 ≥ 80%）— 20 題

@@ -26,6 +26,80 @@ EarningsWatch 透過 **7 節點 LangGraph RAG Agent** 自動分析上市公司�
 
 ---
 
+## 📊 實測數據
+
+> 以下數字皆為**實際量測結果**（量測日：2026-07-24），非設計目標。每張表下方附重現指令。
+> 標記說明：**實測** = 直接量到的值；**推算** = 由實測值依公開定價／規格換算。
+
+### 語料規模（BigQuery 實查）
+
+| 指標 | 數值 |
+|---|---|
+| 公司數 | 4（台積電 2330、鴻海 2317、聯發科 2454、台達電 2308）|
+| 季度覆蓋 | **17 季**（2022Q1 – 2026Q1）|
+| 向量 chunk 總數 | **11,699** |
+| 向量維度 | 768（`gemini-embedding-2` 原生 3072，MRL 截斷）|
+| BigQuery 表大小 | 77.4 MiB |
+
+<details>
+<summary>各公司明細</summary>
+
+| 公司 | chunks | 季數 | 區間 | 平均 chunk 長度 |
+|---|---|---|---|---|
+| 聯發科 | 4,275 | 12 | 2023Q1 – 2025Q4 | 485 字 |
+| 鴻海 | 4,123 | 16 | 2022Q1 – 2025Q4 | 390 字 |
+| 台積電 | 1,924 | 14 | 2022Q4 – 2026Q1 | 584 字 |
+| 台達電 | 1,377 | 17 | 2022Q1 – 2026Q1 | 558 字 |
+
+</details>
+
+```bash
+# 重現：直接查 BigQuery
+bq query --use_legacy_sql=false \
+  'SELECT company, COUNT(*) chunks, COUNT(DISTINCT quarter) quarters FROM `earningswatch-demo.earnings_data.earnings_calls` GROUP BY company'
+```
+
+### 測試覆蓋率（離線，不需任何 API Key）
+
+| 指標 | 數值 |
+|---|---|
+| 單元測試 | **549 passed / 0 failed**（24 個測試檔）|
+| 執行時間 | 41 秒 |
+| 核心層 `src/core` 覆蓋率 | **91.8%**（1,097 敘述，漏 90）|
+| 非 UI 層覆蓋率 | **86.2%**（2,001 敘述，漏 276）|
+| 全專案覆蓋率 | 70.5%（含 Streamlit 頁面，該層以 smoke test 涵蓋）|
+| 測試碼 : 產品碼 | 7,888 : 7,469 行（**1.06 : 1**）|
+
+```bash
+pytest tests/ -q --ignore=tests/benchmark.py --cov=src --cov-report=term
+```
+
+### Ingestion 流水線（2026-05-16 全量重灌實測）
+
+| 指標 | 數值 |
+|---|---|
+| 處理 PDF | 99 檔 |
+| 成功 | **96 檔（97.0%）** |
+| 解析頁數 | 1,958 頁 |
+| 產生 chunk | 3,169 |
+| pdfplumber 抽取失敗頁 | 269 / 1,958（13.7%）→ 交由 LlamaParse fallback 處理 |
+
+### 儲存與掃描成本（推算）
+
+`gemini-embedding-2` 原生 3072 維，本專案以 MRL 截斷至 768 維。embedding 欄位佔全表 88.6%，是掃描成本主體：
+
+| | 768 維（現行） | 3072 維（原生） | 差異 |
+|---|---|---|---|
+| embedding 欄位 | 68.5 MiB（實測）| 274 MiB（推算）| **−75%** |
+| 表總大小 | **77.4 MiB**（實測）| ~283 MiB（推算）| **−73%** |
+| 每次 `VECTOR_SEARCH` 掃描量 | 1× | 4× | **−75%** |
+
+> BigQuery on-demand 依掃描量計費，維度從 3072 → 768（1/4）讓儲存與**每次查詢**掃描量同步降至四分之一。
+> 768 維以下 `gemini-embedding-2` 會自動 L2 normalize，餘弦距離語意不變。
+> （embedding 欄位＝11,699 列 × 768 × 8 bytes；表總大小取自 BigQuery `__TABLES__.size_bytes`。）
+
+---
+
 ## 🆕 最近更新（2026-05-08 起）
 
 | 日期 | 主題 |
@@ -141,7 +215,7 @@ python scripts/run_ingestion.py --pdf TSMC\ 2Q24\ Transcript.pdf  # 單一檔案
 | `LANGSMITH_API_KEY` | 選填 | LangSmith tracing（用 Secret Manager 時會自動橋接到 env）|
 | `COVERAGE_MIN_SCORE` | 選填 | Coverage sweep 餘弦相似度門檻（預設 `0.25`；非 float / 不在 [0,1] 範圍會降回預設並印出警告）|
 
-> 🔄 **自動降級：** 主後端配額用完 / 觸發 429 / 模型下線 / 503 時，會印出友善訊息並自動切到下一個後端（順序：openai → gemini → anthropic → cohere）。
+> 🔄 **自動降級：** 主後端配額用完 / 觸發 429 / 模型下線 / 503 時，會印出友善訊息並自動切到下一個後端（順序：gemini → openai → anthropic → cohere，見 `llm_client._AUTO_DETECT_ORDER`；免費的 Gemini 排第一，付費額度只在 fallback 時消耗）。
 > 🔐 **密鑰管理：** 部署到 GCP 時推薦設 `GCP_SECRET_PROJECT`，金鑰透過 Secret Manager 統一管控；本機開發仍可用 `.env`。
 > ⛔ **已移除：** groq（無 API Key）。
 
