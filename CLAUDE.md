@@ -121,7 +121,9 @@ Boilerplate filtering (two layers):
 
 Single `chat(prompt, max_tokens, mode)` entrypoint. Four active backends — auto-detect order: `gemini → openai → anthropic → cohere` (free Gemini first, then paid OpenAI / Claude). `mode="dev"` uses cheaper/faster models; `mode="demo"` uses best quality.
 
-Models (2026-05): OpenAI `gpt-5` / `gpt-5-mini`, Gemini `gemini-2.5-flash`, Anthropic `claude-sonnet-4-6` / `claude-haiku-4-5-20251001`, Cohere `command-r-plus-08-2024`. Verified against live `models.list()` on 2026-05-08; the previous `gpt-5o` / `gemini-3.0-flash` names returned 404 and have been corrected.
+Models (per `BACKEND_MODELS`): OpenAI `gpt-5` / `gpt-5-mini`, Gemini `gemini-3.1-flash-lite`, Anthropic `claude-sonnet-4-6` / `claude-haiku-4-5-20251001`, Cohere `command-r-plus-08-2024` / `command-r7b-12-2024`. Names were verified against live `models.list()` on 2026-05-08 after `gpt-5o` / `gemini-3.0-flash` returned 404. Rerank uses Cohere `rerank-v3.5`.
+
+⚠️ **OpenAI is currently unusable on this account** (2026-07-26): no `gpt-4o` family access, no embedding models, and `insufficient_quota` on the key. `LLM_BACKEND=openai` in `.env` will fail over. Use `gemini` (free tier) or `anthropic` (paid, topped up).
 
 When a backend hits quota / 429 rate limit / 401-403 auth / 404 model-not-found / 503 unavailable, `chat()` prints a friendly Chinese message (e.g. `⚠️  OpenAI (GPT-5) 今日 token / 配額已用完，自動切換下一個後端…`) and falls through to the next backend. Network/timeout errors retry once on the same backend before falling through. Non-transient errors raise immediately.
 
