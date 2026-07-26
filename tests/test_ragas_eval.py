@@ -107,6 +107,43 @@ class TestStateToContexts:
         out = ragas_eval.state_to_contexts(state)
         assert out == ["valid"]
 
+    def test_extracts_content_from_real_retriever_shape(self):
+        """retriever 實際回傳的形狀是 {"id","score","payload":{"content":...}}。
+
+        內容在 payload 底下。之前只讀頂層 "content" 會回空 list，導致 benchmark
+        的 RAGAS 區塊被 `if ctxs and report:` 靜默跳過。這個測試把真實形狀釘住。
+        """
+        state = {
+            "retrieved": {
+                "2024Q1": [
+                    {"id": "a1", "score": 0.9,
+                     "payload": {"content": "毛利率 53%", "quarter": "2024Q1"}},
+                    {"id": "a2", "score": 0.8,
+                     "payload": {"content": "AI 需求強勁", "quarter": "2024Q1"}},
+                ],
+                "2024Q2": [
+                    {"id": "b1", "score": 0.7,
+                     "payload": {"content": "CoWoS 產能吃緊", "quarter": "2024Q2"}},
+                ],
+            }
+        }
+        out = ragas_eval.state_to_contexts(state)
+        assert len(out) == 3
+        assert "毛利率 53%" in out
+        assert "CoWoS 產能吃緊" in out
+
+    def test_skips_payload_without_content(self):
+        state = {
+            "retrieved": {
+                "2024Q1": [
+                    {"id": "a1", "payload": {"content": "有內容"}},
+                    {"id": "a2", "payload": {"quarter": "2024Q1"}},  # 無 content
+                    {"id": "a3", "payload": {"content": "   "}},     # 只有空白
+                ]
+            }
+        }
+        assert ragas_eval.state_to_contexts(state) == ["有內容"]
+
     def test_handles_non_dict_chunks(self):
         # Robust against malformed data
         state = {"retrieved": {"2024Q1": ["string", None, 123]}}
@@ -164,6 +201,10 @@ def _make_metric_modules(*, include_context_recall: bool = True) -> tuple:
     fake_ragas_metrics.faithfulness = faithfulness_obj
     fake_ragas_metrics.answer_relevancy = answer_relevancy_obj
     fake_ragas_metrics.context_precision = context_precision_obj
+    # RAGAS 0.4 起改用 without-reference 變體（見 ragas_eval._build_judge 註解）
+    fake_ragas_metrics.LLMContextPrecisionWithoutReference = (
+        lambda *a, **k: context_precision_obj
+    )
     if include_context_recall:
         fake_ragas_metrics.context_recall = context_recall_obj
 
@@ -184,9 +225,26 @@ def _patch_ragas(monkeypatch, fake_ragas, fake_ragas_metrics, fake_datasets):
     monkeypatch.setitem(sys.modules, "ragas", fake_ragas)
     monkeypatch.setitem(sys.modules, "ragas.metrics", fake_ragas_metrics)
     monkeypatch.setitem(sys.modules, "datasets", fake_datasets)
-    monkeypatch.setitem(sys.modules, "langchain_openai", types.ModuleType("langchain_openai"))
     monkeypatch.setattr(ragas_eval, "is_available", lambda: True)
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+
+    # evaluate_query 現在會自己組評審 LLM 與 embedding（_build_judge），這些
+    # 都得是離線替身，否則單元測試會真的去打 API。
+    fake_ragas_llms = types.ModuleType("ragas.llms")
+    fake_ragas_llms.LangchainLLMWrapper = lambda llm: llm
+    monkeypatch.setitem(sys.modules, "ragas.llms", fake_ragas_llms)
+
+    fake_ragas_emb = types.ModuleType("ragas.embeddings")
+    fake_ragas_emb.LangchainEmbeddingsWrapper = lambda emb: emb
+    monkeypatch.setitem(sys.modules, "ragas.embeddings", fake_ragas_emb)
+
+    fake_run_config = types.ModuleType("ragas.run_config")
+    fake_run_config.RunConfig = lambda **kwargs: types.SimpleNamespace(**kwargs)
+    monkeypatch.setitem(sys.modules, "ragas.run_config", fake_run_config)
+
+    fake_langchain_openai = types.ModuleType("langchain_openai")
+    fake_langchain_openai.ChatOpenAI = lambda **kwargs: object()
+    monkeypatch.setitem(sys.modules, "langchain_openai", fake_langchain_openai)
 
 
 class TestEvaluateQueryFull:
@@ -208,7 +266,7 @@ class TestEvaluateQueryFull:
 
     def test_returns_numeric_metric_scores(self, monkeypatch):
         fake_ragas, fake_ragas_metrics, fake_datasets = _make_metric_modules()
-        fake_ragas.evaluate = lambda dataset, metrics: self._result_obj(self._standard_df())
+        fake_ragas.evaluate = lambda dataset, metrics, **kw: self._result_obj(self._standard_df())
         _patch_ragas(monkeypatch, fake_ragas, fake_ragas_metrics, fake_datasets)
 
         out = ragas_eval.evaluate_query("Q?", "A.", contexts=["ctx"])
@@ -218,7 +276,7 @@ class TestEvaluateQueryFull:
 
     def test_non_metric_columns_filtered_out(self, monkeypatch):
         fake_ragas, fake_ragas_metrics, fake_datasets = _make_metric_modules()
-        fake_ragas.evaluate = lambda dataset, metrics: self._result_obj(self._standard_df())
+        fake_ragas.evaluate = lambda dataset, metrics, **kw: self._result_obj(self._standard_df())
         _patch_ragas(monkeypatch, fake_ragas, fake_ragas_metrics, fake_datasets)
 
         out = ragas_eval.evaluate_query("Q?", "A.", contexts=["ctx"])
@@ -228,7 +286,7 @@ class TestEvaluateQueryFull:
 
     def test_empty_df_returns_empty_dict(self, monkeypatch):
         fake_ragas, fake_ragas_metrics, fake_datasets = _make_metric_modules()
-        fake_ragas.evaluate = lambda dataset, metrics: self._result_obj(pd.DataFrame())
+        fake_ragas.evaluate = lambda dataset, metrics, **kw: self._result_obj(pd.DataFrame())
         _patch_ragas(monkeypatch, fake_ragas, fake_ragas_metrics, fake_datasets)
 
         out = ragas_eval.evaluate_query("Q?", "A.", contexts=["ctx"])
@@ -247,14 +305,20 @@ class TestEvaluateQueryFull:
 
     def test_unknown_metrics_arg_returns_empty(self, monkeypatch):
         fake_ragas, fake_ragas_metrics, fake_datasets = _make_metric_modules()
-        fake_ragas.evaluate = lambda dataset, metrics: self._result_obj(self._standard_df())
+        fake_ragas.evaluate = lambda dataset, metrics, **kw: self._result_obj(self._standard_df())
         _patch_ragas(monkeypatch, fake_ragas, fake_ragas_metrics, fake_datasets)
 
         out = ragas_eval.evaluate_query("Q?", "A.", contexts=["ctx"],
                                          metrics=["nonexistent_metric"])
         assert out == {}
 
-    def test_ground_truth_adds_context_recall_to_row(self, monkeypatch):
+    def test_ground_truth_does_not_enable_context_recall(self, monkeypatch):
+        """benchmark 傳入的 ground_truth 是「測項描述」而非人工標註的參考答案。
+
+        拿它當 reference 算出來的 context_recall 不可信，因此即使呼叫端提供了
+        ground_truth，也不該把 context_recall 混進結果。要啟用此 metric，必須
+        先建立真正的黃金答案集。
+        """
         fake_ragas, fake_ragas_metrics, fake_datasets = _make_metric_modules(
             include_context_recall=True
         )
@@ -263,21 +327,20 @@ class TestEvaluateQueryFull:
             "context_recall": [0.75],
             "question": ["Q?"],
         })
-        fake_ragas.evaluate = lambda dataset, metrics: self._result_obj(df)
+        fake_ragas.evaluate = lambda dataset, metrics, **kw: self._result_obj(df)
         _patch_ragas(monkeypatch, fake_ragas, fake_ragas_metrics, fake_datasets)
 
         out = ragas_eval.evaluate_query("Q?", "A.", contexts=["ctx"],
                                          ground_truth="expected answer")
         assert "faithfulness" in out
-        assert "context_recall" in out
-        assert out["context_recall"] == pytest.approx(0.75)
+        assert "context_recall" not in out
 
     def test_context_recall_import_error_silenced(self, monkeypatch):
         # context_recall attr absent → ImportError is caught silently
         fake_ragas, fake_ragas_metrics, fake_datasets = _make_metric_modules(
             include_context_recall=False
         )
-        fake_ragas.evaluate = lambda dataset, metrics: self._result_obj(self._standard_df())
+        fake_ragas.evaluate = lambda dataset, metrics, **kw: self._result_obj(self._standard_df())
         _patch_ragas(monkeypatch, fake_ragas, fake_ragas_metrics, fake_datasets)
 
         out = ragas_eval.evaluate_query("Q?", "A.", contexts=["ctx"],
@@ -290,7 +353,7 @@ class TestEvaluateQueryFull:
             "faithfulness": [0.9],
             "answer_relevancy": ["not-a-number"],
         })
-        fake_ragas.evaluate = lambda dataset, metrics: self._result_obj(df)
+        fake_ragas.evaluate = lambda dataset, metrics, **kw: self._result_obj(df)
         _patch_ragas(monkeypatch, fake_ragas, fake_ragas_metrics, fake_datasets)
 
         out = ragas_eval.evaluate_query("Q?", "A.", contexts=["ctx"])
