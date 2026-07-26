@@ -141,14 +141,27 @@ Every `chat()` call records prompt/completion tokens, duration, and an estimated
 
 ### RAGAS Evaluation (`src/core/ragas_eval.py`)
 
-Optional dependency. When `ragas` and `langchain-openai` are installed and `OPENAI_API_KEY` is set, `benchmark.py --ragas` runs LLM-as-judge metrics against retrieved contexts:
+Optional dependency. `benchmark.py --ragas` runs LLM-as-judge metrics against retrieved contexts:
 
 - `faithfulness` — does the answer cite from retrieved contexts (hallucination inverse)
 - `answer_relevancy` — semantic relevance of answer to query
-- `context_precision` — relevance of retrieved chunks to query
-- `context_recall` — added when `ground_truth` is supplied (uses test description as proxy)
+- `context_precision` — relevance of retrieved chunks to query; uses the **without-reference** variant (`LLMContextPrecisionWithoutReference`), scored against the answer
+- `context_recall` — **not computed.** It needs a real reference answer; benchmark only has the test *description*, which produces a meaningless score. Enabling it requires a hand-labelled gold answer set.
 
-The wrapper degrades gracefully: missing package, missing API key, or empty contexts all return `{}` instead of raising. RAGAS uses its own LLM (GPT-4o by default via `langchain-openai`) — independent of the project's `llm_client` cascade.
+Judge and embeddings are explicit, not RAGAS defaults:
+
+| Env var | Default | Purpose |
+|---|---|---|
+| `RAGAS_JUDGE_PROVIDER` | `openai` | `openai` or `anthropic` |
+| `RAGAS_JUDGE_MODEL` | `gpt-4.1` / `claude-sonnet-4-6` | judge model per provider |
+| `RAGAS_TIMEOUT_SEC` | `900` | per-metric timeout (RAGAS default 180s is too short) |
+| `RAGAS_MAX_CONTEXTS` | `30` | caps contexts — `context_precision` costs 1 LLM call **per context** |
+
+Embeddings reuse the project's Vertex `gemini-embedding-2` (`answer_relevancy` needs them; the OpenAI account has no embedding access). They only compare question↔reverse-generated questions, so they don't grade retrieval.
+
+**Interpreting the scores:** `context_precision` assumes single-answer QA — "was each chunk needed to answer?" Contradiction detection deliberately retrieves broad cross-quarter context (the coverage sweep exists to do exactly that), which this metric penalises by construction. Expect it to read low even on a healthy pipeline; `faithfulness` is the metric that maps to the benchmark's 幻覺率 target. Also verify rerank is actually alive before quoting retrieval numbers: `rerank()` degrades to raw vector ordering on any Cohere failure and prints only a single warning line, so retrieval quality can collapse silently. A Cohere **Trial key is capped at 1000 calls/month** and one 20-question benchmark burns 100+ rerank calls — once exhausted, every call 429s and `context_precision` measures a pipeline with reranking switched off. Grep the run log for `Cohere rerank 失敗` before trusting any retrieval metric.
+
+The wrapper degrades gracefully: missing package, unusable API key, or empty contexts all return `{}` instead of raising. **That silence is a hazard** — a broken judge, a timeout, or a shape mismatch also surface as `ragas_aggregate: None` rather than an error. When scores go missing, check the log for `[RAGAS] ⚠` lines before assuming the model scored badly.
 
 ### BigQuery Client (`src/core/bq_client.py`)
 
@@ -217,6 +230,10 @@ COVERAGE_MIN_SCORE=0.25  # coverage sweep cosine-similarity gate; non-float / ou
 LLM_HYDE_ENABLED=false   # set true to enable HyDE query expansion
 LLM_BUDGET_USD=0.50      # per-query LLM spend cap (USD)
 COHERE_MAX_RPM=10        # Cohere rerank sliding-window throttle (Trial key = 10); 0 disables; non-integer → fallback to 10 with warning
+RAGAS_JUDGE_PROVIDER=openai   # RAGAS judge: openai | anthropic
+RAGAS_JUDGE_MODEL=            # override judge model (default per provider)
+RAGAS_TIMEOUT_SEC=900         # RAGAS per-metric timeout
+RAGAS_MAX_CONTEXTS=30         # cap contexts sent to RAGAS (cost bound)
 LLM_REASONING_EFFORT=minimal  # reasoning_effort for gpt-5* models (prevents reasoning tokens starving output)
 ```
 
