@@ -308,7 +308,7 @@ EarningsWatch/
 | 向量資料庫 | BigQuery `VECTOR_SEARCH`（filter pushdown） | Serverless |
 | Embedding | Gemini `gemini-embedding-2`（MRL 截斷 768 維） | google-genai ≥ 1.0 |
 | LLM 後端 | OpenAI `gpt-5` / `gpt-5-mini`、Gemini `gemini-3.1-flash-lite`、Anthropic `claude-sonnet-4-6` / `claude-haiku-4-5`、Cohere `command-r-plus` | — |
-| Rerank | Cohere `rerank-multilingual-v3.0` | — |
+| Rerank | Cohere `rerank-v3.5`（Trial key 上限 1000 calls/月，超額自動降級為向量排序） | — |
 | 規格管理 | [OpenSpec](https://github.com/Fission-AI/OpenSpec) | — |
 | 密鑰管理 | GCP Secret Manager | — |
 | 新聞檢索 | Tavily Search（公司名稱過濾 + 時間排序） | ≥ 0.5 |
@@ -316,7 +316,7 @@ EarningsWatch/
 | PDF 解析 | pdfplumber | ≥ 0.11 |
 | 圖表 | Plotly | ≥ 5.0 |
 | PDF 匯出 | fpdf2 | ≥ 2.7 |
-| 部署 | GCP Cloud Run | — |
+| 部署 | Streamlit Community Cloud（現行）；GCP Cloud Run 設定保留為選擇性重新部署 | — |
 
 ---
 
